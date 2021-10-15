@@ -12,6 +12,11 @@ struct SimpleShow {}
 
 impl Show for SimpleShow {
     fn frame(self, frame: usize, picture: &mut Picture) -> Self {
+        if frame == 0 {
+            set_constant(128, picture.as_mut_slice(1).unwrap());
+            set_constant(128, picture.as_mut_slice(2).unwrap());
+        }
+
         let ix = frame % SIN_AT_FRAME.len();
         let lum = SIN_AT_FRAME[ix];
         let buf = picture.as_mut_slice(0).unwrap();
@@ -33,4 +38,10 @@ fn main() {
     };
 
     simple::stream(SimpleShow {}, duration);
+}
+
+fn set_constant(val: u8, buf: &mut [u8]) {
+    for x in buf {
+        *x = val
+    }
 }

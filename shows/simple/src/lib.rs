@@ -6,12 +6,11 @@ pub trait Show {
     fn frame(self, frame: usize, picture: &mut Picture) -> Self;
 }
 
-const WIDTH: usize = 1280;
-const HEIGHT: usize = 720;
-const FRAME_RATE: usize = 30; // in fps
+pub const WIDTH: usize = 1280;
+pub const HEIGHT: usize = 720;
+pub const FRAME_RATE: usize = 30; // in fps
 
-/// duration is in number of frames
-pub fn stream(show: impl Show, duration: Option<usize>) {
+pub fn streaming_params() -> Param {
     let param = Param::default_preset("veryfast", None).unwrap();
     let param = param.set_dimension(HEIGHT, WIDTH);
 
@@ -25,13 +24,14 @@ pub fn stream(show: impl Show, duration: Option<usize>) {
     let param = param.param_parse("repeat_headers", "1").unwrap();
     let param = param.param_parse("annexb", "1").unwrap();
     let param = param.param_parse("keyint", &framerate_s).unwrap();
-    let mut param = param.apply_profile("high").unwrap();
+    param.apply_profile("high").unwrap()
+}
 
+/// duration is in number of frames
+pub fn stream(show: impl Show, duration: Option<usize>) {
+    let mut param = streaming_params();
     let mut picture = Picture::from_param(&param).unwrap();
     let mut encoder = Encoder::open(&mut param).unwrap();
-
-    set_constant(128, picture.as_mut_slice(1).unwrap());
-    set_constant(128, picture.as_mut_slice(2).unwrap());
 
     let mut i = 0usize;
     let mut show = show;
@@ -57,11 +57,5 @@ pub fn stream(show: impl Show, duration: Option<usize>) {
             let buf = nal.as_bytes();
             io::stdout().write_all(buf).unwrap();
         }
-    }
-}
-
-fn set_constant(val: u8, buf: &mut [u8]) {
-    for x in buf {
-        *x = val
     }
 }
