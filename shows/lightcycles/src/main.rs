@@ -64,10 +64,6 @@ impl Show for LightCycleShow {
             if new_x < 0f32 || new_x >= UV_WIDTH as f32 {
                 cycle.dy = cycle.dx;
                 cycle.dx = 0f32;
-                eprintln!(
-                    "TURNING, cycle at {} {} / {} {}",
-                    cycle.x, cycle.y, cycle.dx, cycle.dy
-                );
             } else if new_y < 0f32 || new_y >= UV_HEIGHT as f32 {
                 cycle.dx = -cycle.dy;
                 cycle.dy = 0f32;
@@ -106,17 +102,30 @@ impl Show for LightCycleShow {
 fn main() {
     let show = LightCycleShow {
         last_frame: 0,
-        cycles: vec![LightCycle {
-            color: Yuv {
-                y: 255,
-                u: 255,
-                v: 0,
+        cycles: vec![
+            LightCycle {
+                color: Yuv {
+                    y: 255,
+                    u: 255,
+                    v: 0,
+                },
+                x: (UV_WIDTH / 2) as f32,
+                y: (UV_HEIGHT / 2) as f32,
+                dx: 1.0,
+                dy: 0.0,
             },
-            x: (UV_WIDTH / 2) as f32,
-            y: (UV_HEIGHT / 2) as f32,
-            dx: 1.0,
-            dy: 0.0,
-        }],
+            LightCycle {
+                color: Yuv {
+                    y: 255,
+                    u: 0,
+                    v: 255,
+                },
+                x: (UV_WIDTH / 2) as f32,
+                y: (UV_HEIGHT / 2) as f32,
+                dx: 0.0,
+                dy: 1.0,
+            },
+        ],
     };
     simple::stream(show, Some(1000));
 }
