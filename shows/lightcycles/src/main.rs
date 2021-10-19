@@ -57,11 +57,29 @@ impl Show for LightCycleShow {
 
         let mut alive = false;
         for cycle in &mut self.cycles {
-            let move_dx = cycle.dx * dt;
-            let move_dy = cycle.dy * dt;
+            let try_dx = cycle.dx * dt;
+            let try_dy = cycle.dy * dt;
 
-            if path_is_clear(cycle, move_dx, move_dy, picture) {
+            let has_clear_path = if path_is_clear(cycle, try_dx, try_dy, picture) {
+                true
+            } else if path_is_clear(cycle, -try_dy, try_dx, picture) {
+                let new_dx = -cycle.dy;
+                cycle.dy = cycle.dx;
+                cycle.dx = new_dx;
+                true
+            } else if path_is_clear(cycle, try_dy, -try_dx, picture) {
+                let new_dy = -cycle.dx;
+                cycle.dx = cycle.dy;
+                cycle.dy = new_dy;
+                true
+            } else {
+                false
+            };
+
+            if has_clear_path {
                 alive = true;
+                let move_dx = cycle.dx * dt;
+                let move_dy = cycle.dy * dt;
                 let new_x = cycle.x + move_dx;
                 let new_y = cycle.y + move_dy;
 
@@ -92,11 +110,6 @@ impl Show for LightCycleShow {
 
                 cycle.x = new_x;
                 cycle.y = new_y;
-            } else {
-                let new_dx = -cycle.dy;
-                let new_dy = cycle.dx;
-                cycle.dx = new_dx;
-                cycle.dy = new_dy;
             }
         }
 
