@@ -59,58 +59,8 @@ impl Show for LightCycleShow {
         for cycle in &mut self.cycles {
             let move_dx = cycle.dx * dt;
             let move_dy = cycle.dy * dt;
-            let hyp_squared = move_dx * move_dx + move_dy * move_dy;
-            let (sense_range_x, sense_range_y) =
-                if CYCLE_SENSE_RANGE * CYCLE_SENSE_RANGE > hyp_squared {
-                    let hyp = hyp_squared.sqrt();
-                    let norm_dx = cycle.dx / hyp;
-                    let norm_dy = cycle.dy / hyp;
 
-                    (norm_dx * CYCLE_SENSE_RANGE, norm_dy * CYCLE_SENSE_RANGE)
-                } else {
-                    (move_dx, move_dy)
-                };
-
-            let vision_x = cycle.x + sense_range_x;
-            let vision_y = cycle.y + sense_range_y;
-
-            let y_plane = picture.as_slice(0).unwrap();
-            let overdrew = line::rasterize_line(
-                (cycle.x, cycle.y),
-                (vision_x, vision_y),
-                |x, y, intensity| {
-                    if intensity == 0.0 {
-                        return Ok(());
-                    }
-
-                    if !(0..UV_WIDTH as isize).contains(&x) || !(0..UV_HEIGHT as isize).contains(&y)
-                    {
-                        return Err((x, y));
-                    }
-
-                    if (cycle.x - 1.0..=cycle.x + 1.0).contains(&(x as f32))
-                        && (cycle.y - 1.0..=cycle.y + 1.0).contains(&(y as f32))
-                    {
-                        return Ok(());
-                    }
-
-                    for ix in y_indexes(x as usize, y as usize) {
-                        if y_plane[ix] != 0 {
-                            return Err((x, y));
-                        }
-                    }
-
-                    Ok(())
-                },
-            );
-
-            if overdrew.is_err() {
-                // TODO make a more interesting decision (and also, don't *stop* while you're deciding.)
-                let new_dx = -cycle.dy;
-                let new_dy = cycle.dx;
-                cycle.dx = new_dx;
-                cycle.dy = new_dy;
-            } else {
+            if path_is_clear(cycle, move_dx, move_dy, picture) {
                 alive = true;
                 let new_x = cycle.x + move_dx;
                 let new_y = cycle.y + move_dy;
@@ -142,6 +92,11 @@ impl Show for LightCycleShow {
 
                 cycle.x = new_x;
                 cycle.y = new_y;
+            } else {
+                let new_dx = -cycle.dy;
+                let new_dy = cycle.dx;
+                cycle.dx = new_dx;
+                cycle.dy = new_dy;
             }
         }
 
@@ -153,6 +108,53 @@ impl Show for LightCycleShow {
 
         self
     }
+}
+
+fn path_is_clear(cycle: &LightCycle, move_dx: f32, move_dy: f32, picture: &Picture) -> bool {
+    let hyp_squared = move_dx * move_dx + move_dy * move_dy;
+    let (sense_range_x, sense_range_y) = if CYCLE_SENSE_RANGE * CYCLE_SENSE_RANGE > hyp_squared {
+        let hyp = hyp_squared.sqrt();
+        let norm_dx = move_dx / hyp;
+        let norm_dy = move_dy / hyp;
+
+        (norm_dx * CYCLE_SENSE_RANGE, norm_dy * CYCLE_SENSE_RANGE)
+    } else {
+        (move_dx, move_dy)
+    };
+
+    let vision_x = cycle.x + sense_range_x;
+    let vision_y = cycle.y + sense_range_y;
+
+    let y_plane = picture.as_slice(0).unwrap();
+    let overdrew = line::rasterize_line(
+        (cycle.x, cycle.y),
+        (vision_x, vision_y),
+        |x, y, intensity| {
+            if intensity == 0.0 {
+                return Ok(());
+            }
+
+            if !(0..UV_WIDTH as isize).contains(&x) || !(0..UV_HEIGHT as isize).contains(&y) {
+                return Err((x, y));
+            }
+
+            if (cycle.x - 1.0..=cycle.x + 1.0).contains(&(x as f32))
+                && (cycle.y - 1.0..=cycle.y + 1.0).contains(&(y as f32))
+            {
+                return Ok(());
+            }
+
+            for ix in y_indexes(x as usize, y as usize) {
+                if y_plane[ix] != 0 {
+                    return Err((x, y));
+                }
+            }
+
+            Ok(())
+        },
+    );
+
+    overdrew.is_ok()
 }
 
 fn main() {
@@ -194,7 +196,7 @@ fn main() {
             },
         ],
     };
-    simple::stream(show, Some(6000));
+    simple::stream(show, Some(3000));
 }
 
 fn set_constant(val: u8, buf: &mut [u8]) {
