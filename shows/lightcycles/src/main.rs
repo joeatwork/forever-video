@@ -55,9 +55,8 @@ impl Show for LightCycleShow {
         };
         self.last_frame = frame;
 
+        let mut alive = false;
         for cycle in &mut self.cycles {
-            assert!(cycle.x >= 0.0); // TODO
-            assert!(cycle.y >= 0.0); // TODO
             let move_dx = cycle.dx * dt;
             let move_dy = cycle.dy * dt;
             let hyp_squared = move_dx * move_dx + move_dy * move_dy;
@@ -112,6 +111,7 @@ impl Show for LightCycleShow {
                 cycle.dx = new_dx;
                 cycle.dy = new_dy;
             } else {
+                alive = true;
                 let new_x = cycle.x + move_dx;
                 let new_y = cycle.y + move_dy;
 
@@ -145,6 +145,12 @@ impl Show for LightCycleShow {
             }
         }
 
+        if !alive {
+            set_constant(0, picture.as_mut_slice(0).unwrap());
+            set_constant(128, picture.as_mut_slice(1).unwrap());
+            set_constant(128, picture.as_mut_slice(2).unwrap());
+        }
+
         self
     }
 }
@@ -162,7 +168,7 @@ fn main() {
                 x: (UV_WIDTH / 2) as f32,
                 y: (UV_HEIGHT / 2) as f32,
                 dx: 0.0,
-                dy: 4.0,
+                dy: 5.0,
             },
             LightCycle {
                 color: Yuv {
@@ -172,7 +178,7 @@ fn main() {
                 },
                 x: (UV_WIDTH / 2) as f32,
                 y: (UV_HEIGHT / 2) as f32,
-                dx: -4.0,
+                dx: -5.0,
                 dy: 0.0,
             },
             LightCycle {
@@ -183,7 +189,7 @@ fn main() {
                 },
                 x: (UV_WIDTH / 2) as f32,
                 y: (UV_HEIGHT / 2) as f32,
-                dx: -4.0,
+                dx: -5.0,
                 dy: 0.0,
             },
         ],
