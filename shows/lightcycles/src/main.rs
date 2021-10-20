@@ -183,7 +183,7 @@ fn main() {
                 x: (UV_WIDTH / 2) as f32,
                 y: (UV_HEIGHT / 2) as f32,
                 dx: 0.0,
-                dy: 5.0,
+                dy: 6.0,
             },
             LightCycle {
                 color: Yuv {
@@ -209,7 +209,7 @@ fn main() {
             },
         ],
     };
-    simple::stream(show, Some(3000));
+    simple::stream(show, None, None);
 }
 
 fn set_constant(val: u8, buf: &mut [u8]) {

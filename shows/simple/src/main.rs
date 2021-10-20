@@ -37,7 +37,7 @@ fn main() {
         None
     };
 
-    simple::stream(SimpleShow {}, duration);
+    simple::stream(SimpleShow {}, duration, None);
 }
 
 fn set_constant(val: u8, buf: &mut [u8]) {

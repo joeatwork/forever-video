@@ -1,5 +1,3 @@
-use rand;
-use simple;
 use std::io;
 use std::io::Write;
 use x264::{Encoder, Picture};
@@ -8,7 +6,7 @@ use x264::{Encoder, Picture};
 // 1) h264 compression is very good, and so there isn't much of it per frame.
 // 2) h264 compression is very good, so it looks a lot like random noise.
 fn main() {
-    let mut param = simple::streaming_params();
+    let mut param = simple::streaming_params(/* fps= */ 30usize);
     let mut picture = Picture::from_param(&param).unwrap();
     let mut encoder = Encoder::open(&mut param).unwrap();
 

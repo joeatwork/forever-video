@@ -8,9 +8,9 @@ pub trait Show {
 
 pub const WIDTH: usize = 1280;
 pub const HEIGHT: usize = 720;
-pub const FRAME_RATE: usize = 30; // in fps
+pub const DEFAULT_FRAME_RATE: usize = 30; // in fps
 
-pub fn streaming_params() -> Param {
+pub fn streaming_params(fps: usize) -> Param {
     let param = Param::default_preset("veryfast", None).unwrap();
     let param = param.set_dimension(HEIGHT, WIDTH);
 
@@ -18,7 +18,7 @@ pub fn streaming_params() -> Param {
     // (since param.par.i_csp is private, and there isn't [apparently]
     // a param_parse trick to set the color space.)
     // So we're assuming that we're in i420 color space.
-    let framerate_s = format!("{}", FRAME_RATE);
+    let framerate_s = format!("{}", fps);
 
     let param = param.param_parse("fps", &framerate_s).unwrap();
     let param = param.param_parse("repeat_headers", "1").unwrap();
@@ -28,8 +28,8 @@ pub fn streaming_params() -> Param {
 }
 
 /// duration is in number of frames
-pub fn stream(show: impl Show, duration: Option<usize>) {
-    let mut param = streaming_params();
+pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
+    let mut param = streaming_params(fps.unwrap_or(DEFAULT_FRAME_RATE));
     let mut picture = Picture::from_param(&param).unwrap();
     let mut encoder = Encoder::open(&mut param).unwrap();
 
