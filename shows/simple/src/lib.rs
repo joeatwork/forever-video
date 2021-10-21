@@ -59,10 +59,12 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
         .unwrap();
 
     let h264_headers = encoder.get_headers().unwrap().as_bytes();
-    let header_packet_length = h264_headers.len() as u32 + 4;
+    let header_packet_length = h264_headers.len() as u32 + 5;
 
     // TODO it'd be much more polite to write all of this header
     // stuff into a buffer.
+
+    // TAG HEADER
     io::stdout().write_u8(0x09).unwrap(); // VIDEO
     io::stdout()
         .write_u24::<BigEndian>(header_packet_length)
@@ -74,6 +76,15 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
         .write_u8(0x0) // EXTENDED TIMESTAMP
         .unwrap();
     io::stdout().write_u24::<BigEndian>(0x0).unwrap(); // Stream ID
+
+    // VIDEODATA HEADER
+    io::stdout().write_u8(0x27).unwrap(); // [0010] "keyframe", [0111] "avc codec"
+
+    // AVCVIDEODATA HEADER
+    io::stdout().write_u8(0x0).unwrap(); // header
+    io::stdout().write_i24::<BigEndian>(0x0).unwrap(); // composition time, zero
+
+    io::stdout().write_all(h264_headers);
 
     while duration.is_none() || duration.unwrap() > i {
         show = show.frame(i, &mut picture);
@@ -96,8 +107,11 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
             // AVCVIDEO packet type and the composition_time_offset
             let packet_length = buf.len() as u32 + 4;
 
-            // TODO it'd be much more polite to write all of this header
-            // stuff into a buffer.
+            // SHOWSTOPPER! We need to know whether the given NAU is a keyframe
+            // or not. This data is *not* provided by x264-rs. So we need to
+            // go ahead and use bindgen
+
+            //
             io::stdout().write_u8(0x09).unwrap(); // VIDEO
             io::stdout().write_u24::<BigEndian>(packet_length).unwrap();
             io::stdout()
