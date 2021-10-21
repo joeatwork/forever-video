@@ -29,12 +29,14 @@ pub fn streaming_params(fps: usize) -> Param {
 
 /// duration is in number of frames
 pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
-    let mut param = streaming_params(fps.unwrap_or(DEFAULT_FRAME_RATE));
+    let target_fps = fps.unwrap_or(DEFAULT_FRAME_RATE);
+    let mut param = streaming_params(target_fps);
     let mut picture = Picture::from_param(&param).unwrap();
     let mut encoder = Encoder::open(&mut param).unwrap();
 
     let mut i = 0usize;
     let mut show = show;
+
     while duration.is_none() || duration.unwrap() > i {
         show = show.frame(i, &mut picture);
 
