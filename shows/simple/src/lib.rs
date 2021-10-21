@@ -22,7 +22,6 @@ pub fn streaming_params(fps: usize) -> Param {
 
     let param = param.param_parse("fps", &framerate_s).unwrap();
     let param = param.param_parse("repeat_headers", "1").unwrap();
-    let param = param.param_parse("annexb", "1").unwrap();
     let param = param.param_parse("keyint", &framerate_s).unwrap();
     param.apply_profile("high").unwrap()
 }
