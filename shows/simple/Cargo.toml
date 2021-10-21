@@ -4,6 +4,7 @@ name = "simple"
 version = "0.1.0"
 
 [dependencies]
+byteorder = "1.4"
 x264 = {version = "0.1.0", git = "https://github.com/rust-av/x264-rs"}
 
 [[bin]]
