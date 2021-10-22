@@ -1,5 +1,4 @@
 use simple::Show;
-use x264::Picture;
 
 mod line;
 
@@ -42,11 +41,17 @@ struct LightCycleShow {
 }
 
 impl Show for LightCycleShow {
-    fn frame(mut self, frame: usize, picture: &mut Picture) -> Self {
+    fn frame(
+        mut self,
+        frame: usize,
+        y_plane: &mut [u8],
+        u_plane: &mut [u8],
+        v_plane: &mut [u8],
+    ) -> Self {
         if frame == 0 {
-            set_constant(0, picture.as_mut_slice(0).unwrap());
-            set_constant(128, picture.as_mut_slice(1).unwrap());
-            set_constant(128, picture.as_mut_slice(2).unwrap());
+            set_constant(0, y_plane);
+            set_constant(128, u_plane);
+            set_constant(128, v_plane);
         }
 
         let dt = match frame.checked_sub(self.last_frame) {
@@ -60,14 +65,14 @@ impl Show for LightCycleShow {
             let try_dx = cycle.dx * dt;
             let try_dy = cycle.dy * dt;
 
-            let has_clear_path = if path_is_clear(cycle, try_dx, try_dy, picture) {
+            let has_clear_path = if path_is_clear(cycle, try_dx, try_dy, y_plane) {
                 true
-            } else if path_is_clear(cycle, -try_dy, try_dx, picture) {
+            } else if path_is_clear(cycle, -try_dy, try_dx, y_plane) {
                 let new_dx = -cycle.dy;
                 cycle.dy = cycle.dx;
                 cycle.dx = new_dx;
                 true
-            } else if path_is_clear(cycle, try_dy, -try_dx, picture) {
+            } else if path_is_clear(cycle, try_dy, -try_dx, y_plane) {
                 let new_dy = -cycle.dx;
                 cycle.dx = cycle.dy;
                 cycle.dy = new_dy;
@@ -93,15 +98,11 @@ impl Show for LightCycleShow {
                         let y = iy as usize;
 
                         let luma = (intensity * cycle.color.y as f32) as u8;
-                        let y_plane = picture.as_mut_slice(0).unwrap();
                         for ix in y_indexes(x as usize, y as usize) {
                             y_plane[ix] = luma;
                         }
 
-                        let u_plane = picture.as_mut_slice(1).unwrap();
                         u_plane[uv_index(x, y)] = cycle.color.u;
-
-                        let v_plane = picture.as_mut_slice(2).unwrap();
                         v_plane[uv_index(x, y)] = cycle.color.v;
 
                         Ok(())
@@ -114,16 +115,16 @@ impl Show for LightCycleShow {
         }
 
         if !alive {
-            set_constant(0, picture.as_mut_slice(0).unwrap());
-            set_constant(128, picture.as_mut_slice(1).unwrap());
-            set_constant(128, picture.as_mut_slice(2).unwrap());
+            set_constant(0, y_plane);
+            set_constant(128, u_plane);
+            set_constant(128, v_plane);
         }
 
         self
     }
 }
 
-fn path_is_clear(cycle: &LightCycle, move_dx: f32, move_dy: f32, picture: &Picture) -> bool {
+fn path_is_clear(cycle: &LightCycle, move_dx: f32, move_dy: f32, y_plane: &mut [u8]) -> bool {
     let hyp_squared = move_dx * move_dx + move_dy * move_dy;
     let (sense_range_x, sense_range_y) = if CYCLE_SENSE_RANGE * CYCLE_SENSE_RANGE > hyp_squared {
         let hyp = hyp_squared.sqrt();
@@ -138,7 +139,6 @@ fn path_is_clear(cycle: &LightCycle, move_dx: f32, move_dy: f32, picture: &Pictu
     let vision_x = cycle.x + sense_range_x;
     let vision_y = cycle.y + sense_range_y;
 
-    let y_plane = picture.as_slice(0).unwrap();
     let overdrew = line::rasterize_line(
         (cycle.x, cycle.y),
         (vision_x, vision_y),
