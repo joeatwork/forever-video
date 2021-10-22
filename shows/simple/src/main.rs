@@ -1,6 +1,5 @@
 use simple::Show;
 use std::env;
-use x264::Picture;
 
 const SIN_AT_FRAME: [u8; 60] = [
     128, 141, 154, 167, 179, 191, 202, 213, 222, 231, 238, 244, 249, 252, 254, 255, 254, 252, 249,
@@ -11,16 +10,15 @@ const SIN_AT_FRAME: [u8; 60] = [
 struct SimpleShow {}
 
 impl Show for SimpleShow {
-    fn frame(self, frame: usize, picture: &mut Picture) -> Self {
+    fn frame(self, frame: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) -> Self {
         if frame == 0 {
-            set_constant(128, picture.as_mut_slice(1).unwrap());
-            set_constant(128, picture.as_mut_slice(2).unwrap());
+            set_constant(128, u);
+            set_constant(128, v);
         }
 
         let ix = frame % SIN_AT_FRAME.len();
         let lum = SIN_AT_FRAME[ix];
-        let buf = picture.as_mut_slice(0).unwrap();
-        for x in buf {
+        for x in y {
             *x = lum;
         }
 
