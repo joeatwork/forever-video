@@ -1,4 +1,6 @@
 use byteorder::{BigEndian, WriteBytesExt};
+use std::cmp;
+use std::convert::TryFrom;
 use std::ffi::CString;
 use std::io;
 use std::io::Write;
@@ -13,7 +15,7 @@ pub trait Show {
 
 pub const WIDTH: usize = 1280;
 pub const HEIGHT: usize = 720;
-pub const DEFAULT_FRAME_RATE: usize = 30; // in fps
+pub const DEFAULT_FRAME_RATE: u32 = 30; // in fps
 
 // From https://www.adobe.com/content/dam/acom/en/devnet/flv/video_file_format_spec_v10.pdf
 const FLV_HEADER: [u8; 9] = [
@@ -86,6 +88,13 @@ struct Encoder {
     encoder: *mut x264_sys::x264_t,
 }
 
+struct Encoded {
+    data: Vec<u8>,
+    seekable: bool,
+    presentation_ts: i64,
+    decode_ts: i64,
+}
+
 impl Encoder {
     fn new(param: &mut x264_sys::x264_param_t) -> Self {
         let encoder = unsafe { x264_sys::x264_encoder_open(param as *mut x264_sys::x264_param_t) };
@@ -97,7 +106,36 @@ impl Encoder {
         Encoder { encoder }
     }
 
-    fn encode_picture(&mut self, pic_in: *const x264_sys::x264_picture_t) -> Vec<u8> {
+    fn headers(&mut self) -> Vec<u8> {
+        let mut pp_nal: mem::MaybeUninit<*mut x264_sys::x264_nal_t> = mem::MaybeUninit::uninit();
+        let mut pi_nal: raw::c_int = 0;
+
+        let ret = unsafe {
+            x264_sys::x264_encoder_headers(
+                self.encoder,
+                pp_nal.as_mut_ptr(),
+                &mut pi_nal as *mut raw::c_int,
+            )
+        };
+
+        if ret < 0 {
+            panic!("can't produce encoder headers");
+        }
+
+        let pp_nal = unsafe { pp_nal.assume_init() };
+        let mut data = Vec::new();
+        for i in 0..pi_nal {
+            let nal = unsafe { Box::from_raw(pp_nal.offset(i as isize)) };
+            let payload = unsafe { slice::from_raw_parts(nal.p_payload, nal.i_payload as usize) };
+            data.extend_from_slice(payload);
+
+            mem::forget(nal);
+        }
+
+        data
+    }
+
+    fn encode_picture(&mut self, pic_in: &mut x264_sys::x264_picture_t) -> Option<Encoded> {
         let mut pic_out: mem::MaybeUninit<x264_sys::x264_picture_t> = mem::MaybeUninit::uninit();
         let mut pp_nal: mem::MaybeUninit<*mut x264_sys::x264_nal_t> = mem::MaybeUninit::uninit();
         let mut pi_nal: raw::c_int = 0;
@@ -113,31 +151,46 @@ impl Encoder {
         };
 
         if result < 0 {
-            panic!("can't encode"); // You will regret this.
+            panic!("can't encode");
         }
 
-        let _pic_out = unsafe { pic_out.assume_init() };
-        let pp_nal = unsafe { pp_nal.assume_init() };
-        let mut encoded: Vec<u8> = Vec::new();
+        if pi_nal <= 0 {
+            return None;
+        }
 
-        // TODO I'm unsure that smooshing these nals together is legit, if I
-        // (for example) need to label a particular NAU as a seekable keyframe
-        // in the output...
+        let pic_out = unsafe { pic_out.assume_init() };
+        let pp_nal = unsafe { pp_nal.assume_init() };
+        let mut data = Vec::new();
+        let mut seekable = false;
+
+        eprintln!(
+            "Timestamps in encoding pic_out.i_pts {} pic_out.i_dts {}",
+            pic_out.i_pts, pic_out.i_dts
+        );
+
+        // OK, we have an array of nal units, and *some* of them might be IDR frames?
         for i in 0..pi_nal {
             let nal = unsafe { Box::from_raw(pp_nal.offset(i as isize)) };
+
+            // TODO: This seems not-quite-legit - if I have a bunch of nal units and only
+            // ONE of them is seekable, is this slice seekable? I guess we'll see...
+            seekable = seekable || nal.i_type == x264_sys::nal_unit_type_e_NAL_SLICE_IDR as i32;
             let payload = unsafe { slice::from_raw_parts(nal.p_payload, nal.i_payload as usize) };
 
-            encoded.extend_from_slice(payload);
-
+            data.extend_from_slice(payload);
             mem::forget(nal);
         }
 
-        encoded
+        Some(Encoded {
+            data,
+            seekable,
+            decode_ts: pic_out.i_dts,
+            presentation_ts: pic_out.i_pts,
+        })
     }
 
-    fn delayed_frames(&mut self) -> usize {
-        let ret = unsafe { x264_sys::x264_encoder_delayed_frames(self.encoder) };
-        ret as usize
+    fn delayed_frames(&mut self) -> i32 {
+        unsafe { x264_sys::x264_encoder_delayed_frames(self.encoder) }
     }
 }
 
@@ -147,105 +200,96 @@ impl Drop for Encoder {
     }
 }
 
+fn write_flv_header(out: &mut impl Write) -> io::Result<()> {
+    out.write_all(&FLV_HEADER)
+}
+
+enum AvcPacketType {
+    SequenceHeader { data: Vec<u8> },
+    Nalu { presentation_ts: i64, data: Vec<u8> },
+    SequenceEnd,
+}
+
+/// input timestamps should be in h264 ticks, 1/90,000 of a second.
+/// (That means these u32 timestamps only support around 13 hours of video.)
+fn write_video_tag(
+    out: &mut impl Write,
+    decode_ts: i64,
+    seekable: bool,
+    packet_type: AvcPacketType,
+) -> io::Result<()> {
+    let (packet_type_code, presentation_ts, data) = match packet_type {
+        AvcPacketType::SequenceHeader { data } => (0, 0, data),
+        AvcPacketType::SequenceEnd => (2, 0, vec![]),
+        AvcPacketType::Nalu {
+            presentation_ts: ts,
+            data,
+        } => (1, ts, data),
+    };
+
+    // Data length is data.len() + 1 byte videodata header + 4 bytes avcvideopacket header
+    let data_size = u32::try_from(data.len()).unwrap() + 1 + 4;
+
+    eprintln!(
+        "decode_ts {} presentation_ts {}",
+        decode_ts, presentation_ts
+    );
+
+    // decode_millis will eventually overflow...
+    let decode_millis = decode_ts / 90;
+    let composition_offset_millis = i32::try_from((presentation_ts - decode_ts) / 90).unwrap();
+
+    // Tag header - 11 bytes
+    out.write_u8(0x09)?; // tag type - 9 == video
+    out.write_u24::<BigEndian>(data_size)?;
+    out.write_u24::<BigEndian>((decode_millis & 0xffffff) as u32)?;
+    out.write_u8((decode_millis >> 24 & 0xff) as u8)?;
+    out.write_u24::<BigEndian>(0x0)?; // stream id
+
+    // VIDEODATA header - one byte
+    let frametype = if seekable { 1u8 << 4 } else { 2u8 << 4 };
+    let codec_id = 7u8; // AVC codec
+    out.write_u8(frametype | codec_id)?;
+
+    // AVCVIDEOPACKET header - 4 bytes
+    out.write_u8(packet_type_code)?;
+    out.write_i24::<BigEndian>(composition_offset_millis)?;
+
+    out.write_all(&data)?;
+
+    // Total tag length is data_size + 11 bytes tag header
+    out.write_u32::<BigEndian>(data_size + 11)?;
+
+    Ok(())
+}
+
 /// duration is in number of frames
-pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
+pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     let framerate = fps.unwrap_or(DEFAULT_FRAME_RATE);
-    let mut param = stream_params(framerate as u32);
+    let mut param = stream_params(framerate);
     let mut picture = Picture::new(&param);
     let mut encoder = Encoder::new(&mut param);
-
-    THIS IS PRETTY MUCH NONSENSE
-    NEXT STEPS ARE TO EMIT FLV STUFF.
-
-    let mut previous_tag_size = 0u32;
-    let mut i = 0usize;
     let mut show = show;
 
     // TODO blocking writes on stdout is probably the wrong thing
-    // unless you know you're way out ahead of the stream.
-    // Might be worth checking out tokio and manually buffering
-    // video output internally? Or maybe there is a nice
-    // buffered output we can use?
+    // consider a buffered writer.
+    let mut out = io::stdout();
 
-    io::stdout().write_all(&FLV_HEADER).unwrap();
-    io::stdout()
-        .write_u32::<BigEndian>(previous_tag_size)
-        .unwrap();
+    write_flv_header(&mut out).unwrap();
+    out.write_u32::<BigEndian>(0).unwrap(); // previous tag size is zero
+    let h264_headers = encoder.headers();
+    write_video_tag(
+        &mut out,
+        0,
+        true, // headers are apparently seekable
+        AvcPacketType::SequenceHeader { data: h264_headers },
+    )
+    .unwrap();
 
-    // TODO need to write get_headers here so you can actually get the headers.
-
-    let h264_headers = encoder.get_headers().unwrap().as_bytes();
-    let header_packet_length = h264_headers.len() as u32 + 5;
-
-    // TODO it'd be much more polite to write all of this header
-    // stuff into a buffer.
-
-    // TAG HEADER
-    io::stdout().write_u8(0x09).unwrap(); // VIDEO
-    io::stdout()
-        .write_u24::<BigEndian>(header_packet_length)
-        .unwrap();
-    io::stdout()
-        .write_u24::<BigEndian>(0x0) // TIMESTAMP
-        .unwrap();
-    io::stdout()
-        .write_u8(0x0) // EXTENDED TIMESTAMP
-        .unwrap();
-    io::stdout().write_u24::<BigEndian>(0x0).unwrap(); // Stream ID
-
-    // VIDEODATA HEADER
-    io::stdout().write_u8(0x27).unwrap(); // [0010] "keyframe", [0111] "avc codec"
-
-    // AVCVIDEODATA HEADER
-    io::stdout().write_u8(0x0).unwrap(); // header
-    io::stdout().write_i24::<BigEndian>(0x0).unwrap(); // composition time, zero
-
-    io::stdout().write_all(h264_headers);
-
-    // TODO need decoding_ts, presentation_ts, and Seekable-ness from encoder.
-
-            // Per some stack overflow type
-            // pts and dts are in 1/90,000 of a second.
-            // The "timestamp" field in the FLV is the DECODE timestamp
-            // of the video, so:
-            let timestamp = decoding_ts / 90;
-
-            // "composition time", in the data packet, is the difference in millis
-            // between decoding time and presentation time, so:
-            let composition_time_offset = (presentation_ts - decoding_ts) / 90;
-
-            // 4 bytes of additional data in the video packet, the
-            // AVCVIDEO packet type and the composition_time_offset
-            let packet_length = buf.len() as u32 + 4;
-
-            // SHOWSTOPPER! We need to know whether the given NAU is a keyframe
-            // or not. This data is *not* provided by x264-rs. So we need to
-            // go ahead and use bindgen
-
-            //
-            io::stdout().write_u8(0x09).unwrap(); // VIDEO
-            io::stdout().write_u24::<BigEndian>(packet_length).unwrap();
-            io::stdout()
-                .write_u24::<BigEndian>((timestamp & 0xffffff) as u32)
-                .unwrap();
-            io::stdout()
-                .write_u8((timestamp >> 24 & 0xff) as u8)
-                .unwrap();
-            io::stdout().write_u24::<BigEndian>(0x0).unwrap(); // Stream ID
-
-            io::stdout().write_u8(0x01).unwrap(); // AVCVIDEO packet type 1, NALU
-            io::stdout()
-                .write_i24::<BigEndian>(composition_time_offset as i32)
-                .unwrap();
-
-            io::stdout().write_all(buf).unwrap();
-            previous_tag_size = packet_length + 11;
-            io::stdout()
-                .write_u32::<BigEndian>(previous_tag_size)
-                .unwrap();
     // h264 time in 90,000 ticks per second, framerate in frames / second
-    let ticks_per_frame = 90000 / framerate as i64;
-    while duration.is_none() || duration.unwrap() > i {
+    let ticks_per_frame = 90000 / i64::from(framerate);
+    let mut frame = 0usize;
+    while duration.is_none() || duration.unwrap() > frame {
         let y_plane =
             unsafe { slice::from_raw_parts_mut(picture.picture.img.plane[0], WIDTH * HEIGHT) };
         let u_plane = unsafe {
@@ -255,22 +299,51 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<usize>) {
             std::slice::from_raw_parts_mut(picture.picture.img.plane[2], (WIDTH * HEIGHT) >> 2)
         };
 
-        show = show.frame(i, y_plane, u_plane, v_plane);
+        show = show.frame(frame, y_plane, u_plane, v_plane);
         picture.picture.i_pts += ticks_per_frame;
 
-        let buf = encoder.encode_picture(&picture.picture);
+        if let Some(encoded) = encoder.encode_picture(&mut picture.picture) {
+            write_video_tag(
+                &mut out,
+                encoded.decode_ts,
+                encoded.seekable,
+                AvcPacketType::Nalu {
+                    presentation_ts: encoded.presentation_ts,
+                    data: encoded.data,
+                },
+            )
+            .unwrap();
+        }
 
-        // TODO blocking on stdout is probably the wrong thing
-        // unless you know you're way out ahead of the stream.
-        // Might be worth checking out tokio and manually buffering
-        // video output internally? Or maybe there is a nice
-        // buffered output we can use?
-        io::stdout().write_all(&buf).unwrap();
-        i += 1;
+        frame += 1;
     }
 
+    /*
+    Missing delayed frames
+
+    let mut last_presentation_time = picture.picture.i_pts;
     while encoder.delayed_frames() > 0 {
-        let buf = encoder.encode_picture(ptr::null());
-        io::stdout().write_all(&buf).unwrap();
+        let encoded = encoder.encode_picture(None).unwrap();
+        last_presentation_time = cmp::max(encoded.presentation_ts, last_presentation_time);
+        write_video_tag(
+            &mut out,
+            encoded.decode_ts,
+            encoded.seekable,
+            AvcPacketType::Nalu {
+                presentation_ts: encoded.presentation_ts,
+                data: encoded.data,
+            },
+        )
+        .unwrap();
     }
+    */
+
+    // last_presentation_time and seekable here are best guesses.
+    write_video_tag(
+        &mut out,
+        last_presentation_time,
+        true, // Seekable? Sure, why not?
+        AvcPacketType::SequenceEnd,
+    )
+    .unwrap();
 }

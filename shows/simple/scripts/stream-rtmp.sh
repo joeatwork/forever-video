@@ -3,6 +3,6 @@
 . $(pwd)/SECRETS
 
 ./shows/simple/target/release/simple | \
-    ffmpeg -f h264 -i pipe: \
+    ffmpeg -f flv -i pipe: \
         -stream_loop -1 -i ./shows/simple/media/design-for-dreaming.mp3 \
-        -f flv -vcodec libx264 -g 30 "$RTMP_INGEST"
+        -f flv -vcodec copy "$RTMP_INGEST"
