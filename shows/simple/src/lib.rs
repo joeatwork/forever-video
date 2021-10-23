@@ -168,11 +168,6 @@ impl Encoder {
         let mut data = Vec::new();
         let mut seekable = false;
 
-        eprintln!(
-            "Timestamps in encoding pic_out.i_pts {} pic_out.i_dts {}",
-            pic_out.i_pts, pic_out.i_dts
-        );
-
         // OK, we have an array of nal units, and *some* of them might be IDR frames?
         for i in 0..pi_nal {
             let nal = unsafe { Box::from_raw(pp_nal.offset(i as isize)) };
@@ -234,11 +229,6 @@ fn write_video_tag(
 
     // Data length is data.len() + 1 byte videodata header + 4 bytes avcvideopacket header
     let data_size = u32::try_from(data.len()).unwrap() + 1 + 4;
-
-    eprintln!(
-        "decode_ts {} presentation_ts {}",
-        decode_ts, presentation_ts
-    );
 
     // decode_millis will eventually overflow...
     let decode_millis = decode_ts / 90;
