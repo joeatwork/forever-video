@@ -135,17 +135,22 @@ impl Encoder {
         data
     }
 
-    fn encode_picture(&mut self, pic_in: &mut x264_sys::x264_picture_t) -> Option<Encoded> {
+    fn encode_picture(&mut self, pic_in: Option<&mut x264_sys::x264_picture_t>) -> Option<Encoded> {
         let mut pic_out: mem::MaybeUninit<x264_sys::x264_picture_t> = mem::MaybeUninit::uninit();
         let mut pp_nal: mem::MaybeUninit<*mut x264_sys::x264_nal_t> = mem::MaybeUninit::uninit();
         let mut pi_nal: raw::c_int = 0;
+
+        let pic_in_ptr = match pic_in {
+            Some(p) => p as *mut x264_sys::x264_picture_t,
+            None => ptr::null::<*const x264_sys::x264_picture_t>() as *mut x264_sys::x264_picture_t,
+        };
 
         let result = unsafe {
             x264_sys::x264_encoder_encode(
                 self.encoder,
                 pp_nal.as_mut_ptr(),
                 &mut pi_nal as *mut raw::c_int,
-                pic_in as *mut x264_sys::x264_picture_t,
+                pic_in_ptr,
                 pic_out.as_mut_ptr(),
             )
         };
@@ -302,7 +307,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
         show = show.frame(frame, y_plane, u_plane, v_plane);
         picture.picture.i_pts += ticks_per_frame;
 
-        if let Some(encoded) = encoder.encode_picture(&mut picture.picture) {
+        if let Some(encoded) = encoder.encode_picture(Some(&mut picture.picture)) {
             write_video_tag(
                 &mut out,
                 encoded.decode_ts,
@@ -317,9 +322,6 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
 
         frame += 1;
     }
-
-    /*
-    Missing delayed frames
 
     let mut last_presentation_time = picture.picture.i_pts;
     while encoder.delayed_frames() > 0 {
@@ -336,7 +338,6 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
         )
         .unwrap();
     }
-    */
 
     // last_presentation_time and seekable here are best guesses.
     write_video_tag(
