@@ -21,4 +21,4 @@ fi
 # You can run a bandwidth test only by appending ?bandwidthtest=true
 # to your RTMP_INGEST url. You can see the results of your tests at
 # https://inspector.twitch.tv/
-ffmpeg -re -f h264 -i pipe: $audio_args -f flv -vcodec copy "${RTMP_INGEST}"
+ffmpeg -re -probesize 1000 -analyzeduration 1000 -i pipe: $audio_args -vcodec copy -f flv "${RTMP_INGEST}"
