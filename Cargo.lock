@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutup"
+version = "0.1.0"
+dependencies = [
+ "simple",
+]
+
+[[package]]
 name = "env_logger"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,7 +207,7 @@ name = "lightcycles"
 version = "0.1.0"
 dependencies = [
  "rand",
- "simple",
+ "stream",
 ]
 
 [[package]]
@@ -352,6 +359,13 @@ checksum = "7fdf1b9db47230893d76faad238fd6097fd6d6a9245cd7a4d90dbd639536bbd2"
 
 [[package]]
 name = "simple"
+version = "0.1.0"
+dependencies = [
+ "stream",
+]
+
+[[package]]
+name = "stream"
 version = "0.1.0"
 dependencies = [
  "byteorder",

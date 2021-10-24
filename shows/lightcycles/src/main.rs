@@ -1,4 +1,4 @@
-use simple::Show;
+use stream::Show;
 
 mod line;
 
@@ -17,8 +17,8 @@ struct LightCycle {
     dy: f32,
 }
 
-const UV_WIDTH: usize = simple::WIDTH >> 1;
-const UV_HEIGHT: usize = simple::HEIGHT >> 1;
+const UV_WIDTH: usize = stream::WIDTH >> 1;
+const UV_HEIGHT: usize = stream::HEIGHT >> 1;
 const CYCLE_SENSE_RANGE: f32 = 8.0;
 
 #[inline]
@@ -30,8 +30,8 @@ fn uv_index(x: usize, y: usize) -> usize {
 fn y_indexes(x: usize, y: usize) -> [usize; 4] {
     let scaled_x = x * 2;
     let scaled_y = y * 2;
-    let row1 = (simple::WIDTH * scaled_y) + scaled_x;
-    let row2 = (simple::WIDTH * (scaled_y + 1)) + scaled_x;
+    let row1 = (stream::WIDTH * scaled_y) + scaled_x;
+    let row2 = (stream::WIDTH * (scaled_y + 1)) + scaled_x;
     [row1, row1 + 1, row2, row2 + 1]
 }
 
@@ -209,7 +209,7 @@ fn main() {
             },
         ],
     };
-    simple::stream(show, None, None);
+    stream::stream(show, None, None);
 }
 
 fn set_constant(val: u8, buf: &mut [u8]) {

@@ -1,2 +1,7 @@
 [workspace]
-members = ["shows/simple", "shows/lightcycles"]
+members = [
+  "crates/stream",
+  "shows/simple",
+  "shows/lightcycles",
+  "shows/cutup",
+]

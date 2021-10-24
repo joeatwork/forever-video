@@ -3,8 +3,8 @@ edition = "2018"
 name = "lightcycles"
 version = "0.1.0"
 
-[dependencies.simple]
-path = "../simple"
+[dependencies.stream]
+path = "../../crates/stream"
 
 [dependencies]
 rand = "0.8.4"

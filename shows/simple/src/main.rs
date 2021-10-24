@@ -1,5 +1,5 @@
-use simple::Show;
 use std::env;
+use stream::Show;
 
 const SIN_AT_FRAME: [u8; 60] = [
     128, 141, 154, 167, 179, 191, 202, 213, 222, 231, 238, 244, 249, 252, 254, 255, 254, 252, 249,
@@ -35,7 +35,7 @@ fn main() {
         None
     };
 
-    simple::stream(SimpleShow {}, duration, None);
+    stream::stream(SimpleShow {}, duration, None);
 }
 
 fn set_constant(val: u8, buf: &mut [u8]) {
