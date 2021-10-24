@@ -2,7 +2,7 @@
 
 # TO USE
 #
-#     ./shows/my_show/target/release/show_binary | ./stream-rtmp.sh audio
+#     ./target/release/my_show | ./stream-rtmp.sh audio
 #
 # This script will look for (and source) ./SECRETS and assume that
 # that script has `define RTMP_INGEST` with an RTMP url+key that
