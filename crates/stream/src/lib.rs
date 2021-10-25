@@ -200,10 +200,6 @@ impl Drop for Encoder {
     }
 }
 
-fn write_flv_header(out: &mut impl Write) -> io::Result<()> {
-    out.write_all(&FLV_HEADER)
-}
-
 enum AvcPacketType {
     SequenceHeader { data: Vec<u8> },
     Nalu { presentation_ts: i64, data: Vec<u8> },
@@ -270,7 +266,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     // consider a buffered writer.
     let mut out = io::stdout();
 
-    write_flv_header(&mut out).unwrap();
+    out.write_all(&FLV_HEADER).unwrap();
     out.write_u32::<BigEndian>(0).unwrap(); // previous tag size is zero
     let h264_headers = encoder.headers();
     write_video_tag(

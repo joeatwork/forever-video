@@ -123,6 +123,7 @@ dependencies = [
 name = "cutup"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "simple",
 ]
 
