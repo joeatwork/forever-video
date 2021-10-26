@@ -27,7 +27,7 @@ struct FileRange {
     length: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct VideoNaluTag {
     decode_timestamp: i32,
     composition_time_offset: i32,
@@ -35,7 +35,7 @@ struct VideoNaluTag {
     range: FileRange,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AudioTag {
     timestamp: i32,
     range: FileRange,
@@ -69,6 +69,40 @@ enum AvcVideoInfo {
         composition_time_offset: i32,
     },
     EndOfSequence,
+}
+
+trait Timed {
+    fn begins(&self) -> i32;
+    fn set_begins(&mut self, timestamp: i32);
+    fn seekable(&self) -> bool;
+}
+
+impl Timed for VideoNaluTag {
+    fn begins(&self) -> i32 {
+        self.decode_timestamp
+    }
+
+    fn set_begins(&mut self, timestamp: i32) {
+        self.decode_timestamp = timestamp;
+    }
+
+    fn seekable(&self) -> bool {
+        self.seekable
+    }
+}
+
+impl Timed for AudioTag {
+    fn begins(&self) -> i32 {
+        self.timestamp
+    }
+
+    fn set_begins(&mut self, timestamp: i32) {
+        self.timestamp = timestamp;
+    }
+
+    fn seekable(&self) -> bool {
+        true
+    }
 }
 
 impl FileRange {
@@ -386,28 +420,29 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
 
 const MIN_SLICE_INTERVAL: i32 = 10 * 1000; // 30 seconds in millis
 
-fn shuffle_audio<R: Rng>(tags: &SeekMap, rng: &mut R) -> Vec<AudioTag> {
-    if tags.audio_tags.is_empty() {
+fn shuffle_timed<T: Timed + Clone, R: Rng>(moments: &[T], rng: &mut R) -> Vec<T> {
+    if moments.is_empty() {
         return Vec::new();
     }
 
     let mut intervals = Vec::new(); // We could guess the capacity here if it matters...
-    let original_timestamps: Vec<i32> = tags.audio_tags.iter().map(|tag| tag.timestamp).collect();
+    let original_timestamps: Vec<i32> = moments.iter().map(|t| t.begins()).collect();
     let mut begin: usize = 0;
     let mut begin_ts: i32 = 0;
-    for (ix, tag) in tags.audio_tags.iter().enumerate() {
-        if (tag.timestamp - begin_ts) > MIN_SLICE_INTERVAL {
+    for (ix, t) in moments.iter().enumerate() {
+        let ts = t.begins();
+        if t.seekable() && (ts - begin_ts) > MIN_SLICE_INTERVAL {
             intervals.push(begin..ix);
             begin = ix;
-            begin_ts = tag.timestamp;
+            begin_ts = ts;
         }
     }
 
     let last_tag = match intervals.last() {
-        None => Some(begin..tags.audio_tags.len()),
+        None => Some(begin..moments.len()),
         Some(range) => {
-            if range.end < tags.audio_tags.len() {
-                Some(range.end..tags.audio_tags.len())
+            if range.end < moments.len() {
+                Some(range.end..moments.len())
             } else {
                 None
             }
@@ -419,13 +454,13 @@ fn shuffle_audio<R: Rng>(tags: &SeekMap, rng: &mut R) -> Vec<AudioTag> {
     }
 
     intervals.shuffle(rng);
-    let mut ret = Vec::with_capacity(tags.audio_tags.len());
+    let mut ret = Vec::with_capacity(moments.len());
     for chunk in intervals {
-        ret.extend(tags.audio_tags[chunk].iter().copied());
+        ret.extend(moments[chunk].iter().cloned());
     }
 
     for (i, ts) in original_timestamps.iter().enumerate() {
-        ret[i].timestamp = *ts;
+        ret[i].set_begins(*ts);
     }
 
     ret
@@ -444,7 +479,8 @@ fn main() {
     let mut tags = scan_tags(&file).unwrap();
 
     let mut rng = rand::thread_rng();
-    tags.audio_tags = shuffle_audio(&tags, &mut rng);
+    tags.audio_tags = shuffle_timed(&mut tags.audio_tags, &mut rng);
+    tags.video_tags = shuffle_timed(&mut tags.video_tags, &mut rng);
 
     tags.dump(&file, std::io::stdout()).unwrap();
 }
