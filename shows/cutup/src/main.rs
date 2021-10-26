@@ -1,5 +1,4 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use std::convert::TryFrom;
 use std::env;
 use std::fs::File;
 use std::io;
@@ -27,11 +26,17 @@ use std::io::{Read, Seek};
 // [] update h264 decode time / presentation times (which means being smart about the content)
 //    and then shuffling the video tags.
 
+#[derive(Debug)]
+struct FileRange {
+    offset: u64,
+    length: u32,
+}
+
 /// Guide for finding a tag in an FLV file.
 #[derive(Debug)]
 struct TagInfo {
-    /// Position of the tag in the file, usable by SeekFrom::Start()
-    tag_offset: u64,
+    /// Position of the tag in the file, not including any previous tag size
+    range: FileRange,
     /// Presentation / Play time associated with the
     timestamp: i32,
 }
@@ -42,11 +47,11 @@ struct VideoTag(TagInfo);
 #[derive(Debug)]
 struct AudioTag(TagInfo);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SeekMap {
-    audio_sequence_header_offset: u64,
-    video_sequence_header_offset: u64,
-    video_end_of_sequence_offset: u64,
+    audio_sequence_header: FileRange,
+    video_sequence_header: FileRange,
+    video_end_of_sequence: FileRange,
     audio_tags: Vec<AudioTag>,
     video_tags: Vec<VideoTag>,
 }
@@ -180,31 +185,25 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
     let mut expect_previous_size = 0u32;
     let mut audio_tags = Vec::new();
     let mut video_tags = Vec::new();
-    let mut audio_sequence_header_offset = None;
-    let mut video_sequence_header_offset = None;
-    let mut video_end_of_sequence_offset = None;
+    let mut audio_sequence_header = None;
+    let mut video_sequence_header = None;
+    let mut video_end_of_sequence = None;
 
     // 4 bytes of previous size check
     // 11 bytes of header for next chunk
     // union(2 bytes of audio header, 5 bytes of video headers, 0 bytes of don't care.)
     let mut separator_buf: [u8; 21] = [0; 21];
-    let separator_length = 15u32;
+    let tag_header_length = 11u32;
+    let separator_length = tag_header_length + 4;
     loop {
-        println!(
-            "Seeking to offset {} / {}, expecting size {}",
-            offset,
-            offset + 4,
-            expect_previous_size
-        );
         inf.seek(SeekFrom::Start(offset))?;
 
         let eof = match read_ignore_interrupted(&mut inf, &mut separator_buf[..]) {
             // 15 bytes is 4 bytes of size check + 11 bytes of tag header
-            Ok(len) if len >= usize::try_from(separator_length).unwrap() => false,
+            Ok(len) if len >= separator_length as usize => false,
             // 4 bytes of size check and EOF is a clean end to the file.
             Ok(len) if len == 4 => true,
-            Ok(weird) => {
-                eprintln!("Strange trailer size {}", weird);
+            Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "corrupted input, eof didn't line up with a previous size check",
@@ -224,37 +223,39 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
 
         if eof {
             return Ok(SeekMap {
-                audio_sequence_header_offset: audio_sequence_header_offset.unwrap(),
-                video_sequence_header_offset: video_sequence_header_offset.unwrap(),
-                video_end_of_sequence_offset: video_end_of_sequence_offset.unwrap(),
+                audio_sequence_header: audio_sequence_header.unwrap(),
+                video_sequence_header: video_sequence_header.unwrap(),
+                video_end_of_sequence: video_end_of_sequence.unwrap(),
                 audio_tags,
                 video_tags,
             });
         }
 
-        let tag_offset = offset + 4;
         let tag_header = read_tag_header(&mut reader)?;
 
-        println!(
-            "Header at {} :: {}/{}/{}",
-            offset, tag_header.datasize, tag_header.tagtype, tag_header.decode_ts
-        );
+        // Size of the whole tag is size of the separator (minus the previous size check)
+        // plus the size of the tag data payload.
+        expect_previous_size = tag_header_length + tag_header.datasize;
+        let tag_range = FileRange {
+            offset: offset + 4, // don't count the Previous Size
+            length: expect_previous_size,
+        };
 
         match tag_header.tagtype {
             8 => match read_audio_headers(&mut reader)? {
                 AacAudioInfo::SequenceHeader => {
-                    audio_sequence_header_offset = Some(tag_offset);
+                    audio_sequence_header = Some(tag_range);
                 }
                 AacAudioInfo::Raw => {
                     audio_tags.push(AudioTag(TagInfo {
-                        tag_offset,
+                        range: tag_range,
                         timestamp: tag_header.decode_ts,
                     }));
                 }
             },
             9 => match read_video_headers(&mut reader)? {
                 AvcVideoInfo::SequenceHeader => {
-                    video_sequence_header_offset = Some(tag_offset);
+                    video_sequence_header = Some(tag_range);
                 }
                 AvcVideoInfo::Nalu {
                     seekable,
@@ -262,13 +263,13 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
                 } => {
                     if seekable {
                         video_tags.push(VideoTag(TagInfo {
-                            tag_offset,
+                            range: tag_range,
                             timestamp: tag_header.decode_ts + composition_time_offset,
                         }))
                     }
                 }
                 AvcVideoInfo::EndOfSequence => {
-                    video_end_of_sequence_offset = Some(tag_offset);
+                    video_end_of_sequence = Some(tag_range);
                 }
             },
             18 => {
@@ -282,9 +283,6 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
             }
         };
 
-        // Size of the whole tag is size of the separator (minus the previous size check)
-        // plus the size of the tag data payload.
-        expect_previous_size = tag_header.datasize + separator_length - 4;
         offset += (tag_header.datasize + separator_length) as u64;
     }
 }
