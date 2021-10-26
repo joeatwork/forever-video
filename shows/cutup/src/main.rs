@@ -1,4 +1,5 @@
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
+use rand::seq::SliceRandom;
 use std::convert::TryFrom;
 use std::env;
 use std::fs::File;
@@ -392,7 +393,14 @@ fn main() {
 
     let fname = infiles.first().unwrap();
     let file = File::open(fname).unwrap();
-    let tags = scan_tags(&file).unwrap();
+    let mut tags = scan_tags(&file).unwrap();
+    let timestamps: Vec<i32> = tags.audio_tags.iter().map(|t| t.timestamp).collect();
+
+    let mut rng = rand::thread_rng();
+    tags.audio_tags.shuffle(&mut rng);
+    for (i, ts) in timestamps.iter().enumerate() {
+        tags.audio_tags[i].timestamp = *ts;
+    }
 
     tags.dump(&file, std::io::stdout()).unwrap();
 }
