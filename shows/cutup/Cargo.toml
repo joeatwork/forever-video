@@ -1,0 +1,10 @@
+[package]
+edition = "2018"
+name = "cutup"
+version = "0.1.0"
+
+[dependencies.simple]
+path = "../simple"
+
+[dependencies]
+byteorder = "1.4"
