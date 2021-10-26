@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use rand::seq::SliceRandom;
+use rand::Rng;
 use std::convert::TryFrom;
 use std::env;
 use std::fs::File;
@@ -34,7 +35,7 @@ struct VideoNaluTag {
     range: FileRange,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct AudioTag {
     timestamp: i32,
     range: FileRange,
@@ -383,6 +384,50 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
     }
 }
 
+const MIN_SLICE_INTERVAL: i32 = 10 * 1000; // 30 seconds in millis
+
+fn shuffle_audio<R: Rng>(tags: &SeekMap, rng: &mut R) -> Vec<AudioTag> {
+    if tags.audio_tags.is_empty() {
+        return Vec::new();
+    }
+
+    let mut intervals = Vec::new(); // We could guess the capacity here if it matters...
+    let original_timestamps: Vec<i32> = tags.audio_tags.iter().map(|tag| tag.timestamp).collect();
+    let mut begin: usize = 0;
+    let mut begin_ts: i32 = 0;
+    for (ix, tag) in tags.audio_tags.iter().enumerate() {
+        if (tag.timestamp - begin_ts) > MIN_SLICE_INTERVAL {
+            intervals.push(begin..ix);
+            begin = ix;
+            begin_ts = tag.timestamp;
+        }
+    }
+
+    // TODO - intervals.last() does a borrow of intervals, and
+    // then intervals.push does mutable borrow if intervals.
+    // This is gonna break in the future.
+    match intervals.last() {
+        None => intervals.push(begin..tags.audio_tags.len()),
+        Some(range) => {
+            if range.end < tags.audio_tags.len() {
+                intervals.push(range.end..tags.audio_tags.len())
+            }
+        }
+    };
+
+    intervals.shuffle(rng);
+    let mut ret = Vec::with_capacity(tags.audio_tags.len());
+    for chunk in intervals {
+        ret.extend(tags.audio_tags[chunk].iter().copied());
+    }
+
+    for (i, ts) in original_timestamps.iter().enumerate() {
+        ret[i].timestamp = *ts;
+    }
+
+    ret
+}
+
 fn main() {
     let args = env::args();
     let infiles = args.skip(1).collect::<Vec<String>>();
@@ -394,13 +439,9 @@ fn main() {
     let fname = infiles.first().unwrap();
     let file = File::open(fname).unwrap();
     let mut tags = scan_tags(&file).unwrap();
-    let timestamps: Vec<i32> = tags.audio_tags.iter().map(|t| t.timestamp).collect();
 
     let mut rng = rand::thread_rng();
-    tags.audio_tags.shuffle(&mut rng);
-    for (i, ts) in timestamps.iter().enumerate() {
-        tags.audio_tags[i].timestamp = *ts;
-    }
+    tags.audio_tags = shuffle_audio(&tags, &mut rng);
 
     tags.dump(&file, std::io::stdout()).unwrap();
 }
