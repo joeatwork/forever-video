@@ -1,4 +1,4 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use std::convert::TryFrom;
 use std::env;
 use std::fs::File;
@@ -7,13 +7,6 @@ use std::io::Cursor;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 // THE PLAN - read an FLV, push out another FLV
-
-// PHASE -1:
-
-// [] reading the FLV
-// [] storing as much of the structure as you wanna
-// [] writing an FLV stream without stream(Show...)
-//        Do we hafta write headers?
 
 // PHASE 0:
 // [] Shuffle audio tags.
@@ -34,16 +27,16 @@ struct FileRange {
 
 #[derive(Debug)]
 struct VideoNaluTag {
-    range: FileRange,
     decode_timestamp: i32,
     composition_time_offset: i32,
     seekable: bool,
+    range: FileRange,
 }
 
 #[derive(Debug)]
 struct AudioTag {
-    range: FileRange,
     timestamp: i32,
+    range: FileRange,
 }
 
 #[derive(Debug)]
@@ -51,6 +44,7 @@ struct SeekMap {
     audio_sequence_header: FileRange,
     video_sequence_header: FileRange,
     video_end_of_sequence: FileRange,
+    end_of_sequence_timestamp: i32,
     audio_tags: Vec<AudioTag>,
     video_tags: Vec<VideoNaluTag>,
 }
@@ -79,19 +73,32 @@ impl FileRange {
     /// Pulls the range from source and writes it to dest.
     /// Does *not* seek dest. Leaves source seeked to a random place.
     /// Return the number of bytes written on success.
-    fn move_range(
-        &self,
-        mut source: impl Read + Seek,
-        mut dest: impl Write,
-        buf: &mut Vec<u8>,
-    ) -> io::Result<u32> {
+    fn read(&self, mut source: impl Read + Seek, buf: &mut Vec<u8>) -> io::Result<()> {
         // Annoyed to be uselessly zeroing out this memory...
         buf.resize(usize::try_from(self.length).unwrap(), 0);
         source.seek(SeekFrom::Start(self.offset))?;
         source.read_exact(buf)?;
-        dest.write_all(buf)?;
-        Ok(u32::try_from(buf.len()).unwrap())
+
+        Ok(())
     }
+}
+
+fn write_tag_with_timestamp(
+    range: FileRange,
+    timestamp: i32,
+    mut source: impl Read + Seek,
+    mut dest: impl Write,
+    buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    range.read(&mut source, buf)?;
+
+    BigEndian::write_u24(&mut buf[4..], (timestamp & 0xffffff) as u32);
+    buf[7] = (timestamp >> 24 & 0xff) as u8;
+
+    dest.write_all(buf)?;
+    dest.write_u32::<BigEndian>(u32::try_from(buf.len()).unwrap())?;
+
+    Ok(())
 }
 
 impl SeekMap {
@@ -110,47 +117,54 @@ impl SeekMap {
 
         dest.write_u32::<BigEndian>(0)?; // First previous tag size
 
-        let size = self
-            .video_sequence_header
-            .move_range(&mut source, &mut dest, &mut buf)?;
-        dest.write_u32::<BigEndian>(size)?;
-
-        let size = self
-            .audio_sequence_header
-            .move_range(&mut source, &mut dest, &mut buf)?;
-        dest.write_u32::<BigEndian>(size)?;
+        write_tag_with_timestamp(
+            self.video_sequence_header,
+            0,
+            &mut source,
+            &mut dest,
+            &mut buf,
+        )?;
+        write_tag_with_timestamp(
+            self.audio_sequence_header,
+            0,
+            &mut source,
+            &mut dest,
+            &mut buf,
+        )?;
 
         let mut audio_ix = 0;
         let mut video_ix = 0;
         while audio_ix < self.audio_tags.len() || video_ix < self.video_tags.len() {
-            let next_range = if video_ix >= self.video_tags.len() {
-                let ret = self.audio_tags[audio_ix].range;
+            let (next_range, next_timestamp) = if video_ix >= self.video_tags.len() {
+                let ret = &self.audio_tags[audio_ix];
                 audio_ix += 1;
-                ret
+                (ret.range, ret.timestamp)
             } else if audio_ix >= self.audio_tags.len() {
-                let ret = self.video_tags[video_ix].range;
+                let ret = &self.video_tags[video_ix];
                 video_ix += 1;
-                ret
+                (ret.range, ret.decode_timestamp)
             } else if self.audio_tags[audio_ix].timestamp
                 < self.video_tags[video_ix].decode_timestamp
             {
-                let ret = self.audio_tags[audio_ix].range;
+                let ret = &self.audio_tags[audio_ix];
                 audio_ix += 1;
-                ret
+                (ret.range, ret.timestamp)
             } else {
-                let ret = self.video_tags[video_ix].range;
+                let ret = &self.video_tags[video_ix];
                 video_ix += 1;
-                ret
+                (ret.range, ret.decode_timestamp)
             };
 
-            let size = next_range.move_range(&mut source, &mut dest, &mut buf)?;
-            dest.write_u32::<BigEndian>(size)?;
+            write_tag_with_timestamp(next_range, next_timestamp, &mut source, &mut dest, &mut buf)?;
         }
 
-        let size = self
-            .video_end_of_sequence
-            .move_range(&mut source, &mut dest, &mut buf)?;
-        dest.write_u32::<BigEndian>(size)?;
+        write_tag_with_timestamp(
+            self.video_end_of_sequence,
+            self.end_of_sequence_timestamp,
+            &mut source,
+            &mut dest,
+            &mut buf,
+        )?;
 
         Ok(())
     }
@@ -268,6 +282,7 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
     let mut audio_sequence_header = None;
     let mut video_sequence_header = None;
     let mut video_end_of_sequence = None;
+    let mut end_of_sequence_timestamp = 0;
 
     // 4 bytes of previous size check
     // 11 bytes of header for next chunk
@@ -306,6 +321,7 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
                 audio_sequence_header: audio_sequence_header.unwrap(),
                 video_sequence_header: video_sequence_header.unwrap(),
                 video_end_of_sequence: video_end_of_sequence.unwrap(),
+                end_of_sequence_timestamp,
                 audio_tags,
                 video_tags,
             });
@@ -348,6 +364,7 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
                 }),
                 AvcVideoInfo::EndOfSequence => {
                     video_end_of_sequence = Some(tag_range);
+                    end_of_sequence_timestamp = tag_header.decode_ts;
                 }
             },
             18 => {
