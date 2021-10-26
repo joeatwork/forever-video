@@ -403,17 +403,20 @@ fn shuffle_audio<R: Rng>(tags: &SeekMap, rng: &mut R) -> Vec<AudioTag> {
         }
     }
 
-    // TODO - intervals.last() does a borrow of intervals, and
-    // then intervals.push does mutable borrow if intervals.
-    // This is gonna break in the future.
-    match intervals.last() {
-        None => intervals.push(begin..tags.audio_tags.len()),
+    let last_tag = match intervals.last() {
+        None => Some(begin..tags.audio_tags.len()),
         Some(range) => {
             if range.end < tags.audio_tags.len() {
-                intervals.push(range.end..tags.audio_tags.len())
+                Some(range.end..tags.audio_tags.len())
+            } else {
+                None
             }
         }
     };
+
+    if let Some(range) = last_tag {
+        intervals.push(range);
+    }
 
     intervals.shuffle(rng);
     let mut ret = Vec::with_capacity(tags.audio_tags.len());
