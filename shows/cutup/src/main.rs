@@ -1,10 +1,10 @@
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use std::convert::TryFrom;
 use std::env;
 use std::fs::File;
 use std::io;
 use std::io::Cursor;
-use std::io::SeekFrom;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 // THE PLAN - read an FLV, push out another FLV
 
@@ -26,26 +26,25 @@ use std::io::{Read, Seek};
 // [] update h264 decode time / presentation times (which means being smart about the content)
 //    and then shuffling the video tags.
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct FileRange {
     offset: u64,
     length: u32,
 }
 
-/// Guide for finding a tag in an FLV file.
 #[derive(Debug)]
-struct TagInfo {
-    /// Position of the tag in the file, not including any previous tag size
+struct VideoNaluTag {
     range: FileRange,
-    /// Presentation / Play time associated with the
-    timestamp: i32,
+    decode_timestamp: i32,
+    composition_time_offset: i32,
+    seekable: bool,
 }
 
 #[derive(Debug)]
-struct VideoTag(TagInfo);
-
-#[derive(Debug)]
-struct AudioTag(TagInfo);
+struct AudioTag {
+    range: FileRange,
+    timestamp: i32,
+}
 
 #[derive(Debug)]
 struct SeekMap {
@@ -53,7 +52,7 @@ struct SeekMap {
     video_sequence_header: FileRange,
     video_end_of_sequence: FileRange,
     audio_tags: Vec<AudioTag>,
-    video_tags: Vec<VideoTag>,
+    video_tags: Vec<VideoNaluTag>,
 }
 
 struct TagHeader {
@@ -74,6 +73,87 @@ enum AvcVideoInfo {
         composition_time_offset: i32,
     },
     EndOfSequence,
+}
+
+impl FileRange {
+    /// Pulls the range from source and writes it to dest.
+    /// Does *not* seek dest. Leaves source seeked to a random place.
+    /// Return the number of bytes written on success.
+    fn move_range(
+        &self,
+        mut source: impl Read + Seek,
+        mut dest: impl Write,
+        buf: &mut Vec<u8>,
+    ) -> io::Result<u32> {
+        // Annoyed to be uselessly zeroing out this memory...
+        buf.resize(usize::try_from(self.length).unwrap(), 0);
+        source.seek(SeekFrom::Start(self.offset))?;
+        source.read_exact(buf)?;
+        dest.write_all(buf)?;
+        Ok(u32::try_from(buf.len()).unwrap())
+    }
+}
+
+impl SeekMap {
+    /// Dumps all known tags from inf to outf. Regular tags are dumped in timestamp order.
+    fn dump(&self, mut source: impl Read + Seek, mut dest: impl Write) -> io::Result<()> {
+        let mut buf = Vec::with_capacity(4096);
+
+        // FLV file header
+        dest.write_all(&[
+            0x46, 0x4c, 0x56, // 'FLV'
+            0x01, // version 1
+            0x05, // use video and audio
+            0x0, 0x0, 0x0,  // reserved
+            0x09, // size of this header
+        ])?;
+
+        dest.write_u32::<BigEndian>(0)?; // First previous tag size
+
+        let size = self
+            .video_sequence_header
+            .move_range(&mut source, &mut dest, &mut buf)?;
+        dest.write_u32::<BigEndian>(size)?;
+
+        let size = self
+            .audio_sequence_header
+            .move_range(&mut source, &mut dest, &mut buf)?;
+        dest.write_u32::<BigEndian>(size)?;
+
+        let mut audio_ix = 0;
+        let mut video_ix = 0;
+        while audio_ix < self.audio_tags.len() || video_ix < self.video_tags.len() {
+            let next_range = if video_ix >= self.video_tags.len() {
+                let ret = self.audio_tags[audio_ix].range;
+                audio_ix += 1;
+                ret
+            } else if audio_ix >= self.audio_tags.len() {
+                let ret = self.video_tags[video_ix].range;
+                video_ix += 1;
+                ret
+            } else if self.audio_tags[audio_ix].timestamp
+                < self.video_tags[video_ix].decode_timestamp
+            {
+                let ret = self.audio_tags[audio_ix].range;
+                audio_ix += 1;
+                ret
+            } else {
+                let ret = self.video_tags[video_ix].range;
+                video_ix += 1;
+                ret
+            };
+
+            let size = next_range.move_range(&mut source, &mut dest, &mut buf)?;
+            dest.write_u32::<BigEndian>(size)?;
+        }
+
+        let size = self
+            .video_end_of_sequence
+            .move_range(&mut source, &mut dest, &mut buf)?;
+        dest.write_u32::<BigEndian>(size)?;
+
+        Ok(())
+    }
 }
 
 fn read_audio_headers(mut inf: impl Read) -> io::Result<AacAudioInfo> {
@@ -247,10 +327,10 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
                     audio_sequence_header = Some(tag_range);
                 }
                 AacAudioInfo::Raw => {
-                    audio_tags.push(AudioTag(TagInfo {
+                    audio_tags.push(AudioTag {
                         range: tag_range,
                         timestamp: tag_header.decode_ts,
-                    }));
+                    });
                 }
             },
             9 => match read_video_headers(&mut reader)? {
@@ -260,14 +340,12 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
                 AvcVideoInfo::Nalu {
                     seekable,
                     composition_time_offset,
-                } => {
-                    if seekable {
-                        video_tags.push(VideoTag(TagInfo {
-                            range: tag_range,
-                            timestamp: tag_header.decode_ts + composition_time_offset,
-                        }))
-                    }
-                }
+                } => video_tags.push(VideoNaluTag {
+                    range: tag_range,
+                    decode_timestamp: tag_header.decode_ts,
+                    composition_time_offset,
+                    seekable,
+                }),
                 AvcVideoInfo::EndOfSequence => {
                     video_end_of_sequence = Some(tag_range);
                 }
@@ -297,7 +375,7 @@ fn main() {
 
     let fname = infiles.first().unwrap();
     let file = File::open(fname).unwrap();
-    let tags = scan_tags(file).unwrap();
+    let tags = scan_tags(&file).unwrap();
 
-    println!("TAGS\n{:#?}", tags);
+    tags.dump(&file, std::io::stdout()).unwrap();
 }
