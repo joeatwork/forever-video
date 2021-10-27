@@ -8,19 +8,6 @@ use std::io;
 use std::io::Cursor;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-// THE PLAN - read an FLV, push out another FLV
-
-// PHASE 0:
-// [] Shuffle audio tags.
-
-// PHASE 0.5:
-// [] Shuffle the video tags and see if it works, or just makes the stream crummy.
-//    (It's POSSIBLE that this will "just work")
-
-// PHASE 1:
-// [] update h264 decode time / presentation times (which means being smart about the content)
-//    and then shuffling the video tags.
-
 #[derive(Clone, Copy, Debug)]
 struct FileRange {
     offset: u64,
@@ -418,7 +405,7 @@ fn scan_tags<T: Read + Seek>(mut inf: T) -> io::Result<SeekMap> {
     }
 }
 
-const MIN_SLICE_INTERVAL: i32 = 10 * 1000; // 30 seconds in millis
+const MIN_SLICE_INTERVAL: i32 = 5 * 1000; // 30 seconds in millis
 
 fn shuffle_timed<T: Timed + Clone, R: Rng>(moments: &[T], rng: &mut R) -> Vec<T> {
     if moments.is_empty() {
@@ -479,8 +466,8 @@ fn main() {
     let mut tags = scan_tags(&file).unwrap();
 
     let mut rng = rand::thread_rng();
-    tags.audio_tags = shuffle_timed(&mut tags.audio_tags, &mut rng);
-    tags.video_tags = shuffle_timed(&mut tags.video_tags, &mut rng);
+    tags.audio_tags = shuffle_timed(&tags.audio_tags, &mut rng);
+    tags.video_tags = shuffle_timed(&tags.video_tags, &mut rng);
 
     tags.dump(&file, std::io::stdout()).unwrap();
 }
