@@ -8,11 +8,16 @@ You can build all of the artifacts in this repository with
 $ cargo build
 ```
 
-The build depends on a local install of libx264, and the associated scripts
-(and general use) require the ffmpeg tool set. On WSL / Ubuntu I got these with
+The build depends on a local install of libx264 and librtmp.
+
+The libx264 build, in particular, assumes version 155 of the library, and will fail to build on other versions.
+
+The and the associated scripts (and general usefulness of the package ) require the ffmpeg tool set.
+
+On WSL / Ubuntu I got these dependencies with:
 
 ```console
-$ sudo apt install x264-dev ffmpeg
+$ sudo apt install libx264-dev librtmp-dev ffmpeg
 ```
 
 # Streaming a show
