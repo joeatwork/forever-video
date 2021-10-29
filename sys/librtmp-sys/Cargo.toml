@@ -1,0 +1,10 @@
+[package]
+edition = "2018"
+name = "librtmp-sys"
+version = "0.1.0"
+
+[dependencies]
+libc = "0.2.0"
+
+[build-dependencies]
+bindgen = "0.59.1"

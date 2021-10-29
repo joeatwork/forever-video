@@ -1,7 +1,10 @@
 [workspace]
 members = [
+  "sys/libx264-sys",
+  "sys/librtmp-sys",
   "crates/stream",
   "shows/simple",
   "shows/lightcycles",
   "shows/cutup",
+  "servers/join_stream",
 ]

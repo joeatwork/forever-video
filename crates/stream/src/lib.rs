@@ -9,6 +9,8 @@ use std::os::raw;
 use std::ptr;
 use std::slice;
 
+use libx264_sys::*;
+
 pub trait Show {
     fn frame(self, frame: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) -> Self;
 }
@@ -26,11 +28,11 @@ const FLV_HEADER: [u8; 9] = [
     0x09, // size of this header
 ];
 
-fn stream_params(fps: u32) -> x264_sys::x264_param_t {
-    let mut param: mem::MaybeUninit<x264_sys::x264_param_t> = mem::MaybeUninit::uninit();
+fn stream_params(fps: u32) -> x264_param_t {
+    let mut param: mem::MaybeUninit<x264_param_t> = mem::MaybeUninit::uninit();
     let veryfast = CString::new("veryfast").unwrap();
     let mut param = match unsafe {
-        x264_sys::x264_param_default_preset(
+        x264_param_default_preset(
             param.as_mut_ptr(),
             veryfast.as_ptr() as *const i8,
             ptr::null(),
@@ -49,21 +51,21 @@ fn stream_params(fps: u32) -> x264_sys::x264_param_t {
 
     let high = CString::new("high").unwrap();
 
-    match unsafe { x264_sys::x264_param_apply_profile(&mut param, high.as_ptr() as *const i8) } {
+    match unsafe { x264_param_apply_profile(&mut param, high.as_ptr() as *const i8) } {
         0 => param,
         _ => unreachable!(),
     }
 }
 
 struct Picture {
-    picture: x264_sys::x264_picture_t,
+    picture: x264_picture_t,
 }
 
 impl Picture {
-    fn new(param: &x264_sys::x264_param_t) -> Self {
-        let mut picture: mem::MaybeUninit<x264_sys::x264_picture_t> = mem::MaybeUninit::uninit();
+    fn new(param: &x264_param_t) -> Self {
+        let mut picture: mem::MaybeUninit<x264_picture_t> = mem::MaybeUninit::uninit();
         let picture = match unsafe {
-            x264_sys::x264_picture_alloc(
+            x264_picture_alloc(
                 picture.as_mut_ptr(),
                 param.i_csp,
                 param.i_width,
@@ -80,12 +82,12 @@ impl Picture {
 
 impl Drop for Picture {
     fn drop(&mut self) {
-        unsafe { x264_sys::x264_picture_clean(&mut self.picture as *mut x264_sys::x264_picture_t) }
+        unsafe { x264_picture_clean(&mut self.picture as *mut x264_picture_t) }
     }
 }
 
 struct Encoder {
-    encoder: *mut x264_sys::x264_t,
+    encoder: *mut x264_t,
 }
 
 struct Encoded {
@@ -96,8 +98,12 @@ struct Encoded {
 }
 
 impl Encoder {
-    fn new(param: &mut x264_sys::x264_param_t) -> Self {
-        let encoder = unsafe { x264_sys::x264_encoder_open(param as *mut x264_sys::x264_param_t) };
+    fn new(param: &mut x264_param_t) -> Self {
+        // libx264 defines "x264_encode_open" as a macro, that expands to
+        // another function name that knows the build version. If you change
+        // the version of the lib to (say) 999, you'll need to change the line
+        // below to x264_encoder_open_999
+        let encoder = unsafe { x264_encoder_open_155(param as *mut x264_param_t) };
 
         if encoder.is_null() {
             panic!("allocation failure");
@@ -107,11 +113,11 @@ impl Encoder {
     }
 
     fn headers(&mut self) -> Vec<u8> {
-        let mut pp_nal: mem::MaybeUninit<*mut x264_sys::x264_nal_t> = mem::MaybeUninit::uninit();
+        let mut pp_nal: mem::MaybeUninit<*mut x264_nal_t> = mem::MaybeUninit::uninit();
         let mut pi_nal: raw::c_int = 0;
 
         let ret = unsafe {
-            x264_sys::x264_encoder_headers(
+            x264_encoder_headers(
                 self.encoder,
                 pp_nal.as_mut_ptr(),
                 &mut pi_nal as *mut raw::c_int,
@@ -135,18 +141,18 @@ impl Encoder {
         data
     }
 
-    fn encode_picture(&mut self, pic_in: Option<&mut x264_sys::x264_picture_t>) -> Option<Encoded> {
-        let mut pic_out: mem::MaybeUninit<x264_sys::x264_picture_t> = mem::MaybeUninit::uninit();
-        let mut pp_nal: mem::MaybeUninit<*mut x264_sys::x264_nal_t> = mem::MaybeUninit::uninit();
+    fn encode_picture(&mut self, pic_in: Option<&mut x264_picture_t>) -> Option<Encoded> {
+        let mut pic_out: mem::MaybeUninit<x264_picture_t> = mem::MaybeUninit::uninit();
+        let mut pp_nal: mem::MaybeUninit<*mut x264_nal_t> = mem::MaybeUninit::uninit();
         let mut pi_nal: raw::c_int = 0;
 
         let pic_in_ptr = match pic_in {
-            Some(p) => p as *mut x264_sys::x264_picture_t,
-            None => ptr::null::<*const x264_sys::x264_picture_t>() as *mut x264_sys::x264_picture_t,
+            Some(p) => p as *mut x264_picture_t,
+            None => ptr::null::<*const x264_picture_t>() as *mut x264_picture_t,
         };
 
         let result = unsafe {
-            x264_sys::x264_encoder_encode(
+            x264_encoder_encode(
                 self.encoder,
                 pp_nal.as_mut_ptr(),
                 &mut pi_nal as *mut raw::c_int,
@@ -174,7 +180,7 @@ impl Encoder {
 
             // TODO: This seems not-quite-legit - if I have a bunch of nal units and only
             // ONE of them is seekable, is this slice seekable? I guess we'll see...
-            seekable = seekable || nal.i_type == x264_sys::nal_unit_type_e_NAL_SLICE_IDR as i32;
+            seekable = seekable || nal.i_type == nal_unit_type_e_NAL_SLICE_IDR as i32;
             let payload = unsafe { slice::from_raw_parts(nal.p_payload, nal.i_payload as usize) };
 
             data.extend_from_slice(payload);
@@ -190,13 +196,13 @@ impl Encoder {
     }
 
     fn delayed_frames(&mut self) -> i32 {
-        unsafe { x264_sys::x264_encoder_delayed_frames(self.encoder) }
+        unsafe { x264_encoder_delayed_frames(self.encoder) }
     }
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        unsafe { x264_sys::x264_encoder_close(self.encoder) };
+        unsafe { x264_encoder_close(self.encoder) };
     }
 }
 
