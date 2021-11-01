@@ -182,9 +182,6 @@ checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 [[package]]
 name = "join_stream"
 version = "0.1.0"
-dependencies = [
- "libavformat-sys",
-]
 
 [[package]]
 name = "lazy_static"
@@ -197,14 +194,6 @@ name = "lazycell"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
-name = "libavformat-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "libc",
-]
 
 [[package]]
 name = "libc"
