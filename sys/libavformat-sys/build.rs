@@ -21,6 +21,7 @@ impl ParseCallbacks for OmitMathMacros {
 }
 
 fn main() {
+    println!("cargo:rustc-link-lib=avutil");
     println!("cargo:rustc-link-lib=avformat");
     println!("cargo:rerun-if-changed=include/wrapper.h");
 
