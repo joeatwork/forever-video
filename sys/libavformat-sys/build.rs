@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rustc-link-lib=rtmp");
+    println!("cargo:rustc-link-lib=avformat");
     println!("cargo:rerun-if-changed=include/wrapper.h");
 
     let bindings = bindgen::Builder::default()

@@ -212,14 +212,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "librtmp-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "libc",
-]
-
-[[package]]
 name = "libx264-sys"
 version = "0.1.0"
 dependencies = [
