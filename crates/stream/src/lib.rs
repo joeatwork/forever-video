@@ -178,8 +178,8 @@ impl Encoder {
         for i in 0..pi_nal {
             let nal = unsafe { Box::from_raw(pp_nal.offset(i as isize)) };
 
-            // TODO: This seems not-quite-legit - if I have a bunch of nal units and only
-            // ONE of them is seekable, is this slice seekable? I guess we'll see...
+            // I *believe* that if we have any seekable nal units, we'll have ONLY
+            // the one seekable nal unit.
             seekable = seekable || nal.i_type == nal_unit_type_e_NAL_SLICE_IDR as i32;
             let payload = unsafe { slice::from_raw_parts(nal.p_payload, nal.i_payload as usize) };
 
@@ -213,7 +213,6 @@ enum AvcPacketType {
 }
 
 /// input timestamps should be in h264 ticks, 1/90,000 of a second.
-/// (That means these u32 timestamps only support around 13 hours of video.)
 fn write_video_tag(
     out: &mut impl Write,
     decode_ts: i64,

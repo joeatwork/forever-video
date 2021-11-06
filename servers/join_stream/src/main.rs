@@ -59,7 +59,11 @@ impl ClientWriter {
                 let packet = serializer
                     .serialize(&payload, msg.force_uncompressed, msg.can_be_dropped)
                     .unwrap();
-                output.write_all(&packet.bytes).await.unwrap();
+
+                if let Err(e) = output.write_all(&packet.bytes).await {
+                    println!("client write error: {}", e);
+                    break;
+                }
             }
         });
 
@@ -265,8 +269,6 @@ impl ClientStream {
             {
                 break payload;
             }
-
-            println!("TODO partial packet? Probably? I'll keep reading...");
         };
 
         // TODO Not quite sure that this is what "ack after bytes" really means...
@@ -289,7 +291,7 @@ fn toerr<T: Display>(error: T) -> String {
     format!("{}", error)
 }
 
-async fn respond_to_command(
+async fn handle_command(
     mut stream: ClientStream,
     command_name: String,
     transaction_id: f64,
@@ -359,15 +361,39 @@ async fn respond_to_command(
     Ok(stream)
 }
 
+fn handle_amf_data(
+    stream: ClientStream,
+    data: Vec<Amf0Value>,
+) -> Result<ClientStream, Box<dyn Error>> {
+    if data.len() == 3
+        && data[0] == Amf0Value::Utf8String("@setDataFrame".into())
+        && data[1] == Amf0Value::Utf8String("onMetaData".into())
+        && matches!(data[2], Amf0Value::Object(..))
+    {
+        match &data[2] {
+            Amf0Value::Object(metadata) => {
+                println!("metadata: {:?}", metadata);
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        println!("TODO unrecognized data {:?}", data);
+    }
+
+    Ok(stream)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("0.0.0.0:1935").await?;
     let (client, _) = listener.accept().await?;
 
-    let mut stream = ClientStream::connect_to_client(client).await?;
+    let mut client_stream = ClientStream::connect_to_client(client).await?;
+
+    // TODO now produce an FLV!
 
     // now just ignore all non-media messages
-    while let Some(msg) = stream.read_message().await? {
+    while let Some(msg) = client_stream.read_message().await? {
         match msg {
             // We need to respond to createStream
             RtmpMessage::Amf0Command {
@@ -376,8 +402,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 command_object,
                 additional_arguments,
             } => {
-                stream = respond_to_command(
-                    stream,
+                client_stream = handle_command(
+                    client_stream,
                     command_name,
                     transaction_id,
                     command_object,
@@ -385,11 +411,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
                 .await?;
             }
+            RtmpMessage::Amf0Data { values } => {
+                client_stream = handle_amf_data(client_stream, values)?;
+            }
             RtmpMessage::SetChunkSize { size } => {
-                stream
+                client_stream
                     .deserializer
                     .set_max_chunk_size(usize::try_from(size).unwrap())
                     .map_err(toerr)?;
+            }
+            RtmpMessage::AudioData { .. } => {
+                print!("."); // TODO
+            }
+            RtmpMessage::VideoData { .. } => {
+                print!("+"); // TODO
+            }
+            RtmpMessage::Acknowledgement { .. } => {
+                // pass.
             }
             _ => {
                 println!("TODO handled message from client: {:?}", msg);
