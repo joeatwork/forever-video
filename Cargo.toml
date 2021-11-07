@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "sys/libx264-sys",
+  "crates/flvmux",
   "crates/stream",
   "shows/simple",
   "shows/lightcycles",

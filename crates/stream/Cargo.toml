@@ -8,3 +8,6 @@ byteorder = "1.4"
 
 [dependencies.libx264-sys]
 path = "../../sys/libx264-sys"
+
+[dependencies.flvmux]
+path = "../flvmux"
