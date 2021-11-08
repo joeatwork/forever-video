@@ -23,19 +23,42 @@ pub fn write_flv_header(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-// Writes 11 bytes of tag header
-pub fn write_video_tag_header(
+pub enum MediaType {
+    Audio = 8,
+    Video = 9,
+}
+
+pub fn write_media_tag_header(
     out: &mut impl Write,
+    media_type: MediaType,
     data_size: u32,
     decode_timestamp: i32,
 ) -> io::Result<()> {
-    out.write_u8(0x09)?; // tag type - 9 == video
+    out.write_u8(media_type as u8)?; // tag type - 9 == video
     out.write_u24::<BigEndian>(data_size)?;
     out.write_u24::<BigEndian>((decode_timestamp & 0xffffff) as u32)?;
     out.write_u8((decode_timestamp >> 24 & 0xff) as u8)?;
     out.write_u24::<BigEndian>(0x0)?; // stream id
 
     Ok(())
+}
+
+// Writes 11 bytes of tag header
+pub fn write_video_tag_header(
+    out: &mut impl Write,
+    data_size: u32,
+    decode_timestamp: i32,
+) -> io::Result<()> {
+    write_media_tag_header(out, MediaType::Video, data_size, decode_timestamp)
+}
+
+// Writes 11 bytes of tag header
+pub fn write_audio_tag_header(
+    out: &mut impl Write,
+    data_size: u32,
+    decode_timestamp: i32,
+) -> io::Result<()> {
+    write_media_tag_header(out, MediaType::Audio, data_size, decode_timestamp)
 }
 
 /// input timestamps should be in h264 ticks, 1/90,000 of a second.

@@ -22,6 +22,8 @@ use tokio::net::{tcp, TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendTimeoutError;
 
+use flvmux::MediaType;
+
 struct Clock(Instant);
 
 impl Clock {
@@ -386,6 +388,23 @@ fn handle_amf_data(
     Ok(stream)
 }
 
+async fn write_media_data(
+    mut dest: Vec<u8>,
+    media_data: &[u8],
+    timestamp: RtmpTimestamp,
+    media_type: MediaType,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let data_size = u32::try_from(media_data.len())?;
+    let tsval = i32::try_from(timestamp.value)?;
+
+    dest.truncate(0);
+    flvmux::write_media_tag_header(&mut dest, media_type, data_size, tsval).unwrap();
+    dest.write_all(media_data).await.unwrap();
+    dest.write_u32(data_size + 11).await.unwrap();
+
+    Ok(dest)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("0.0.0.0:1935").await?;
@@ -425,19 +444,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .set_max_chunk_size(usize::try_from(size).unwrap())
                     .map_err(toerr)?;
             }
-            RtmpMessage::AudioData { .. } => {
-                eprint!("."); // TODO
+            RtmpMessage::AudioData { data } => {
+                outbuffer = write_media_data(outbuffer, &data, timestamp, MediaType::Audio).await?;
+                out.write_all(&outbuffer).await?;
             }
             RtmpMessage::VideoData { data } => {
                 // TODO we get negative timestamps and we should detect them...
                 // (maybe drop them if they're the first video data packet?)
-                let data_size = u32::try_from(data.len())?;
-                let tsval = i32::try_from(timestamp.value)?;
-
-                outbuffer.truncate(0);
-                flvmux::write_video_tag_header(&mut outbuffer, data_size, tsval).unwrap();
-                outbuffer.write_all(&data).await.unwrap();
-                outbuffer.write_u32(data_size + 11).await.unwrap();
+                outbuffer = write_media_data(outbuffer, &data, timestamp, MediaType::Video).await?;
                 out.write_all(&outbuffer).await?;
             }
             RtmpMessage::Acknowledgement { .. } => {
