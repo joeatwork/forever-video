@@ -4,4 +4,4 @@ name = "flvmux"
 version = "0.1.0"
 
 [dependencies]
-byteorder = "1.4"
+byteorder = "1"

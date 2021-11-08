@@ -23,9 +23,24 @@ pub fn write_flv_header(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+// Writes 11 bytes of tag header
+pub fn write_video_tag_header(
+    out: &mut impl Write,
+    data_size: u32,
+    decode_timestamp: i32,
+) -> io::Result<()> {
+    out.write_u8(0x09)?; // tag type - 9 == video
+    out.write_u24::<BigEndian>(data_size)?;
+    out.write_u24::<BigEndian>((decode_timestamp & 0xffffff) as u32)?;
+    out.write_u8((decode_timestamp >> 24 & 0xff) as u8)?;
+    out.write_u24::<BigEndian>(0x0)?; // stream id
+
+    Ok(())
+}
+
 /// input timestamps should be in h264 ticks, 1/90,000 of a second.
 pub fn write_video_tag(
-    out: &mut impl Write,
+    mut out: &mut impl Write,
     decode_ts: i64,
     seekable: bool,
     packet_type: AvcPacketType,
@@ -42,16 +57,11 @@ pub fn write_video_tag(
     // Data length is data.len() + 1 byte videodata header + 4 bytes avcvideopacket header
     let data_size = u32::try_from(data.len()).unwrap() + 1 + 4;
 
-    // decode_millis will eventually overflow...
     let decode_millis = decode_ts / 90;
     let composition_offset_millis = i32::try_from((presentation_ts - decode_ts) / 90).unwrap();
 
     // Tag header - 11 bytes
-    out.write_u8(0x09)?; // tag type - 9 == video
-    out.write_u24::<BigEndian>(data_size)?;
-    out.write_u24::<BigEndian>((decode_millis & 0xffffff) as u32)?;
-    out.write_u8((decode_millis >> 24 & 0xff) as u8)?;
-    out.write_u24::<BigEndian>(0x0)?; // stream id
+    write_video_tag_header(&mut out, data_size, i32::try_from(decode_millis).unwrap())?;
 
     // VIDEODATA header - one byte
     let frametype = if seekable { 1u8 << 4 } else { 2u8 << 4 };

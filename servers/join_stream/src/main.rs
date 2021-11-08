@@ -1,4 +1,5 @@
 // This file is heavily sourced from libavformat/rtmpproto.c
+
 //   https://github.com/FFmpeg/FFmpeg/blob/05f9b3a0a570fcacbd38570f0860afdabc80a791/libavformat/rtmppkt.c
 //
 // As such, it is licensed under version 2.1 of the GNU Lesser General Public License,
@@ -16,9 +17,10 @@ use std::convert::TryFrom;
 use std::error::Error;
 use std::fmt::Display;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{tcp, TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::SendTimeoutError;
 
 struct Clock(Instant);
 
@@ -61,7 +63,7 @@ impl ClientWriter {
                     .unwrap();
 
                 if let Err(e) = output.write_all(&packet.bytes).await {
-                    println!("client write error: {}", e);
+                    eprintln!("client write error: {}", e);
                     break;
                 }
             }
@@ -70,19 +72,8 @@ impl ClientWriter {
         ClientWriter { sender }
     }
 
-    // TODO the point of using async at all is so that callers don't have to `await` send
     async fn send(&mut self, message: RtmpMessage) {
-        self.sender
-            .send_timeout(
-                WriteMessage {
-                    message,
-                    force_uncompressed: false,
-                    can_be_dropped: false,
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .unwrap();
+        self.send_with_options(message, false, false).await;
     }
 
     async fn send_with_options(
@@ -91,7 +82,8 @@ impl ClientWriter {
         force_uncompressed: bool,
         can_be_dropped: bool,
     ) {
-        self.sender
+        if let Err(e) = self
+            .sender
             .send_timeout(
                 WriteMessage {
                     message,
@@ -101,7 +93,14 @@ impl ClientWriter {
                 Duration::from_secs(1),
             )
             .await
-            .unwrap();
+        {
+            match e {
+                SendTimeoutError::Closed(msg) => {
+                    eprintln!("client has gone away, dropping message {:?}", &msg);
+                }
+                _ => panic!("{}", e),
+            }
+        }
     }
 }
 
@@ -166,7 +165,7 @@ impl ClientStream {
                         break transaction_id;
                     }
                     other => {
-                        println!(
+                        eprintln!(
                             "TODO skipping client rtmp message before connect {:?}",
                             other
                         )
@@ -254,7 +253,9 @@ impl ClientStream {
     }
 
     /// Blocks until the next message appears on the stream. Returns None on EOF
-    async fn read_message(&mut self) -> Result<Option<RtmpMessage>, Box<dyn Error>> {
+    async fn read_message(
+        &mut self,
+    ) -> Result<Option<(RtmpTimestamp, RtmpMessage)>, Box<dyn Error>> {
         let payload = loop {
             let n = self.reader.read(&mut self.buf).await?;
             if n == 0 {
@@ -282,8 +283,10 @@ impl ClientStream {
             self.bytes_since_ack = 0;
         }
 
+        // Payload knows the timestamp!
         let ret = payload.to_rtmp_message().map_err(toerr)?;
-        Ok(Some(ret))
+
+        Ok(Some((payload.timestamp, ret)))
     }
 }
 
@@ -351,10 +354,10 @@ async fn handle_command(
                 .await;
         }
         "_error" | "_result" | "onStatus" | "onBWDone" => {
-            println!("TODO ignoring expected message {}", command_name);
+            eprintln!("TODO ignoring expected message {}", command_name);
         }
         _ => {
-            println!("TODO ignoring surprising message {}", command_name);
+            eprintln!("TODO ignoring surprising message {}", command_name);
         }
     };
 
@@ -372,12 +375,12 @@ fn handle_amf_data(
     {
         match &data[2] {
             Amf0Value::Object(metadata) => {
-                println!("metadata: {:?}", metadata);
+                eprintln!("metadata: {:?}", metadata);
             }
             _ => unreachable!(),
         }
     } else {
-        println!("TODO unrecognized data {:?}", data);
+        eprintln!("TODO unrecognized data {:?}", data);
     }
 
     Ok(stream)
@@ -389,11 +392,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (client, _) = listener.accept().await?;
 
     let mut client_stream = ClientStream::connect_to_client(client).await?;
-
-    // TODO now produce an FLV!
+    let mut out = io::stdout();
+    let mut outbuffer = Vec::new();
+    flvmux::write_flv_header(&mut outbuffer).unwrap();
+    out.write_all(&outbuffer).await.unwrap();
 
     // now just ignore all non-media messages
-    while let Some(msg) = client_stream.read_message().await? {
+    while let Some((timestamp, msg)) = client_stream.read_message().await? {
         match msg {
             // We need to respond to createStream
             RtmpMessage::Amf0Command {
@@ -421,16 +426,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map_err(toerr)?;
             }
             RtmpMessage::AudioData { .. } => {
-                print!("."); // TODO
+                eprint!("."); // TODO
             }
-            RtmpMessage::VideoData { .. } => {
-                print!("+"); // TODO
+            RtmpMessage::VideoData { data } => {
+                // TODO we get negative timestamps and we should detect them...
+                // (maybe drop them if they're the first video data packet?)
+                let data_size = u32::try_from(data.len())?;
+                let tsval = i32::try_from(timestamp.value)?;
+
+                outbuffer.truncate(0);
+                flvmux::write_video_tag_header(&mut outbuffer, data_size, tsval).unwrap();
+                outbuffer.write_all(&data).await.unwrap();
+                outbuffer.write_u32(data_size + 11).await.unwrap();
+                out.write_all(&outbuffer).await?;
             }
             RtmpMessage::Acknowledgement { .. } => {
                 // pass.
             }
             _ => {
-                println!("TODO handled message from client: {:?}", msg);
+                eprintln!("TODO handled message from client: {:?}", msg);
             }
         }
     }
@@ -439,7 +453,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // - Keep N threads around.
     // - for every connection, "assign" it to a thread or reject if we have too many connections.
     // - Thread - when assigned, grabs a connection, work work works, EVENTUALLY releases a connection
-    println!("TODO completed cleanly");
+    eprintln!("TODO completed cleanly");
 
     Ok(())
 }

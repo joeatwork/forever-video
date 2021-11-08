@@ -6,7 +6,7 @@ use std::os::raw;
 use std::ptr;
 use std::slice;
 
-use flvmux::{write_flv_header, write_video_tag, AvcPacketType};
+use flvmux::AvcPacketType;
 
 use libx264_sys::*;
 
@@ -208,10 +208,10 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     // consider a buffered writer.
     let mut out = io::stdout();
 
-    write_flv_header(&mut out).unwrap();
+    flvmux::write_flv_header(&mut out).unwrap();
 
     let h264_headers = encoder.headers();
-    write_video_tag(
+    flvmux::write_video_tag(
         &mut out,
         0,
         true, // headers are apparently seekable
@@ -236,7 +236,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
         picture.picture.i_pts += ticks_per_frame;
 
         if let Some(encoded) = encoder.encode_picture(Some(&mut picture.picture)) {
-            write_video_tag(
+            flvmux::write_video_tag(
                 &mut out,
                 encoded.decode_ts,
                 encoded.seekable,
@@ -255,7 +255,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     while encoder.delayed_frames() > 0 {
         let encoded = encoder.encode_picture(None).unwrap();
         last_presentation_time = cmp::max(encoded.presentation_ts, last_presentation_time);
-        write_video_tag(
+        flvmux::write_video_tag(
             &mut out,
             encoded.decode_ts,
             encoded.seekable,
@@ -268,7 +268,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     }
 
     // last_presentation_time and seekable here are best guesses.
-    write_video_tag(
+    flvmux::write_video_tag(
         &mut out,
         last_presentation_time,
         true, // Seekable? Sure, why not?
