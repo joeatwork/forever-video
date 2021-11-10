@@ -1,4 +1,5 @@
 use std::cmp;
+use std::convert::TryFrom;
 use std::ffi::CString;
 use std::io;
 use std::mem;
@@ -85,6 +86,16 @@ struct Encoded {
     seekable: bool,
     presentation_ts: i64,
     decode_ts: i64,
+}
+
+impl Encoded {
+    fn decode_time_millis(&self) -> i32 {
+        i32::try_from(self.decode_ts / 90).unwrap()
+    }
+
+    fn composition_offset_millis(&self) -> i32 {
+        i32::try_from((self.presentation_ts - self.decode_ts) / 90).unwrap()
+    }
 }
 
 impl Encoder {
@@ -211,13 +222,7 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
     flvmux::write_flv_header(&mut out).unwrap();
 
     let h264_headers = encoder.headers();
-    flvmux::write_video_tag(
-        &mut out,
-        0,
-        true, // headers are apparently seekable
-        AvcPacketType::SequenceHeader { data: h264_headers },
-    )
-    .unwrap();
+    flvmux::write_video_tag(&mut out, 0, AvcPacketType::SequenceHeader, &h264_headers).unwrap();
 
     // h264 time in 90,000 ticks per second, framerate in frames / second
     let ticks_per_frame = 90000 / i64::from(framerate);
@@ -238,12 +243,12 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
         if let Some(encoded) = encoder.encode_picture(Some(&mut picture.picture)) {
             flvmux::write_video_tag(
                 &mut out,
-                encoded.decode_ts,
-                encoded.seekable,
+                encoded.decode_time_millis(),
                 AvcPacketType::Nalu {
-                    presentation_ts: encoded.presentation_ts,
-                    data: encoded.data,
+                    composition_offset_millis: encoded.composition_offset_millis(),
+                    seekable: encoded.seekable,
                 },
+                &encoded.data,
             )
             .unwrap();
         }
@@ -257,22 +262,17 @@ pub fn stream(show: impl Show, duration: Option<usize>, fps: Option<u32>) {
         last_presentation_time = cmp::max(encoded.presentation_ts, last_presentation_time);
         flvmux::write_video_tag(
             &mut out,
-            encoded.decode_ts,
-            encoded.seekable,
+            encoded.decode_time_millis(),
             AvcPacketType::Nalu {
-                presentation_ts: encoded.presentation_ts,
-                data: encoded.data,
+                composition_offset_millis: encoded.composition_offset_millis(),
+                seekable: encoded.seekable,
             },
+            &encoded.data,
         )
         .unwrap();
     }
 
     // last_presentation_time and seekable here are best guesses.
-    flvmux::write_video_tag(
-        &mut out,
-        last_presentation_time,
-        true, // Seekable? Sure, why not?
-        AvcPacketType::SequenceEnd,
-    )
-    .unwrap();
+    let last_time_millis = i32::try_from(last_presentation_time / 90).unwrap();
+    flvmux::write_video_tag(&mut out, last_time_millis, AvcPacketType::SequenceEnd, &[]).unwrap();
 }
