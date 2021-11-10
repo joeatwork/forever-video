@@ -3,9 +3,6 @@ edition = "2018"
 name = "stream"
 version = "0.1.0"
 
-[dependencies]
-byteorder = "1.4"
-
 [dependencies.libx264-sys]
 path = "../../sys/libx264-sys"
 
