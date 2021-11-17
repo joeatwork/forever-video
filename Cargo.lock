@@ -201,7 +201,6 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "rand",
- "simple",
 ]
 
 [[package]]
@@ -332,6 +331,7 @@ dependencies = [
 name = "join_stream"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "flvmux",
  "maplit",
  "rml_amf0",

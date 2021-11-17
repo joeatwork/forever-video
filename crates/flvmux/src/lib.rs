@@ -36,7 +36,7 @@ pub enum MediaType {
     Video = 9,
 }
 
-fn read_audio_headers(mut inf: impl Read) -> io::Result<AacAudioPacketType> {
+pub fn read_audio_header(mut inf: impl Read) -> io::Result<AacAudioPacketType> {
     let audiodata = inf.read_u8()?;
     if audiodata != 0xAF {
         return Err(io::Error::new(
@@ -59,7 +59,7 @@ fn read_audio_headers(mut inf: impl Read) -> io::Result<AacAudioPacketType> {
     Ok(ret)
 }
 
-fn read_video_headers(mut inf: impl Read) -> io::Result<AvcPacketType> {
+pub fn read_video_header(mut inf: impl Read) -> io::Result<AvcPacketType> {
     let seekable = match inf.read_u8()? {
         // (frame type 1, seekable)(data type 7, avc)
         0x17 => true,

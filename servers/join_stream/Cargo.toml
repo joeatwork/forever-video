@@ -4,6 +4,7 @@ name = "join_stream"
 version = "0.1.0"
 
 [dependencies]
+byteorder = "1"
 maplit = "1"
 rml_amf0 = "0.1.2"
 rml_rtmp = "0.5.0"
