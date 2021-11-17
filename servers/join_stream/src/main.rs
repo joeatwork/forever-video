@@ -440,43 +440,51 @@ async fn main() {
 
     let mut out = io::stdout();
     let mut mixer = mixer::FifoMixer::default();
+    let (sender, mut receiver) = mpsc::channel(PRE_MIXER_CHANNEL_BUFFER_SIZE);
 
     let mut outbuffer = Vec::new();
     flvmux::write_flv_header(&mut outbuffer).unwrap();
     out.write_all(&outbuffer).await.unwrap();
 
-    let (client, _) = listener.accept().await.unwrap(); // TODO?
-    let (sender, mut receiver) = mpsc::channel(PRE_MIXER_CHANNEL_BUFFER_SIZE);
-    let source = mixer.new_source();
     tokio::spawn(async move {
-        // TODO do something better with errors, please
-        let client_stream = ClientStream::connect_to_client(client).await.unwrap();
-        handle_client_stream(client_stream, source, sender)
-            .await
-            .unwrap();
+        while let Some(media) = receiver.recv().await {
+            outbuffer.truncate(0);
+            let result = match media {
+                MediaData::Video {
+                    data,
+                    timestamp,
+                    source,
+                } => mixer.source_video(&mut outbuffer, source, &data, timestamp),
+                MediaData::Audio {
+                    data,
+                    timestamp,
+                    source,
+                } => mixer.source_audio(&mut outbuffer, source, &data, timestamp),
+            };
+            result.unwrap();
+            out.write_all(&outbuffer).await.unwrap(); // TODO
+        }
     });
 
-    while let Some(media) = receiver.recv().await {
-        outbuffer.truncate(0);
-        let result = match media {
-            MediaData::Video {
-                data,
-                timestamp,
-                source,
-            } => mixer.source_video(&mut outbuffer, source, &data, timestamp),
-            MediaData::Audio {
-                data,
-                timestamp,
-                source,
-            } => mixer.source_audio(&mut outbuffer, source, &data, timestamp),
-        };
-        result.unwrap();
-        out.write_all(&outbuffer).await.unwrap(); // TODO
+    let mut next_source: mixer::MixerSource = 0;
+    loop {
+        let (client, _) = listener.accept().await.unwrap(); // TODO?
+        next_source += 1;
+        let source = next_source;
+        let snd = sender.clone();
+        tokio::spawn(async move {
+            // TODO do something better with errors, please
+            let client_stream = ClientStream::connect_to_client(client).await.unwrap();
+            handle_client_stream(client_stream, source, snd)
+                .await
+                .unwrap();
+        });
+
+        eprintln!("TODO {} completed cleanly", source);
     }
 
     // Plan
     // - Keep N threads around.
     // - for every connection, "assign" it to a thread or reject if we have too many connections.
     // - Thread - when assigned, grabs a connection, work work works, EVENTUALLY releases a connection
-    eprintln!("TODO completed cleanly");
 }
