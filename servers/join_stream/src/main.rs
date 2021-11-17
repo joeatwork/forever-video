@@ -10,11 +10,6 @@ extern crate maplit;
 
 mod mixer;
 
-use rml_amf0::Amf0Value;
-use rml_rtmp::chunk_io::{ChunkDeserializer, ChunkSerializer};
-use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
-use rml_rtmp::messages::{PeerBandwidthLimitType, RtmpMessage, UserControlEventType};
-use rml_rtmp::time::RtmpTimestamp;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::fmt::Display;
@@ -22,6 +17,12 @@ use std::time::Instant;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+
+use rml_amf0::Amf0Value;
+use rml_rtmp::chunk_io::{ChunkDeserializer, ChunkSerializer};
+use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
+use rml_rtmp::messages::{PeerBandwidthLimitType, RtmpMessage, UserControlEventType};
+use rml_rtmp::time::RtmpTimestamp;
 
 use mixer::Mixer;
 
@@ -37,6 +38,7 @@ impl Clock {
 
 const READ_BUFFER_SIZE: usize = 4096;
 const PRE_MIXER_CHANNEL_BUFFER_SIZE: usize = 100;
+const MAX_CLIENT_COUNT: usize = 10;
 
 #[derive(Debug)]
 struct WriteMessage {
@@ -440,51 +442,74 @@ async fn main() {
 
     let mut out = io::stdout();
     let mut mixer = mixer::FifoMixer::default();
-    let (sender, mut receiver) = mpsc::channel(PRE_MIXER_CHANNEL_BUFFER_SIZE);
-
     let mut outbuffer = Vec::new();
     flvmux::write_flv_header(&mut outbuffer).unwrap();
     out.write_all(&outbuffer).await.unwrap();
 
-    tokio::spawn(async move {
-        while let Some(media) = receiver.recv().await {
-            outbuffer.truncate(0);
-            let result = match media {
-                MediaData::Video {
-                    data,
-                    timestamp,
-                    source,
-                } => mixer.source_video(&mut outbuffer, source, &data, timestamp),
-                MediaData::Audio {
-                    data,
-                    timestamp,
-                    source,
-                } => mixer.source_audio(&mut outbuffer, source, &data, timestamp),
-            };
-            result.unwrap();
-            out.write_all(&outbuffer).await.unwrap(); // TODO
-        }
-    });
+    {
+        // Scope for channels and children
+        let (media_sender, mut media_receiver) = mpsc::channel(PRE_MIXER_CHANNEL_BUFFER_SIZE);
+        let (client_exit_sender, mut client_exit_receiver) = mpsc::channel(MAX_CLIENT_COUNT);
 
-    let mut next_source: mixer::MixerSource = 0;
-    loop {
-        let (client, _) = listener.accept().await.unwrap(); // TODO?
-        next_source += 1;
-        let source = next_source;
-        let snd = sender.clone();
         tokio::spawn(async move {
-            // TODO do something better with errors, please
-            let client_stream = ClientStream::connect_to_client(client).await.unwrap();
-            handle_client_stream(client_stream, source, snd)
-                .await
-                .unwrap();
+            while let Some(media) = media_receiver.recv().await {
+                outbuffer.truncate(0);
+                let result = match media {
+                    MediaData::Video {
+                        data,
+                        timestamp,
+                        source,
+                    } => mixer.source_video(&mut outbuffer, source, &data, timestamp),
+                    MediaData::Audio {
+                        data,
+                        timestamp,
+                        source,
+                    } => mixer.source_audio(&mut outbuffer, source, &data, timestamp),
+                };
+                result.unwrap();
+                out.write_all(&outbuffer).await.unwrap(); // TODO
+            }
+
+            eprintln!("TODO No more writing to do.");
         });
 
-        eprintln!("TODO {} completed cleanly", source);
-    }
+        let mut next_source: mixer::MixerSource = 0;
+        let mut client_count = 0;
+        loop {
+            let tcp_accept = tokio::select! {
+                val = listener.accept() => val,
+                result = client_exit_receiver.recv() => {
+                    if let Err(e) = result.unwrap() {
+                        eprintln!("client error: {:?}", e);
+                    }
 
-    // Plan
-    // - Keep N threads around.
-    // - for every connection, "assign" it to a thread or reject if we have too many connections.
-    // - Thread - when assigned, grabs a connection, work work works, EVENTUALLY releases a connection
+                    if client_count == 0 {
+                        break;
+                    } else {
+                        continue;
+                    }
+                }
+            };
+
+            let (client, _) = tcp_accept.unwrap();
+            next_source += 1;
+            client_count += 1;
+
+            let source = next_source;
+            let media_snd = media_sender.clone();
+            let exit_snd = client_exit_sender.clone();
+
+            tokio::spawn(async move {
+                let result = ClientStream::connect_to_client(client).await;
+                let result = match result {
+                    Ok(stream) => handle_client_stream(stream, source, media_snd).await,
+                    Err(e) => Err(e),
+                };
+
+                exit_snd.send(result).await.unwrap();
+            });
+        }
+    } // media_sender.drop()
+
+    eprintln!("all writers complete.");
 }
