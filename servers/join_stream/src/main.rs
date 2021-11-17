@@ -20,7 +20,8 @@ use std::error::Error;
 use std::fmt::Display;
 use std::time::Instant;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{tcp, TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 use mixer::Mixer;
 
@@ -43,52 +44,14 @@ struct WriteMessage {
     can_be_dropped: bool,
 }
 
-struct ClientWriter {
-    clock: Clock,
-    output: tcp::OwnedWriteHalf,
-    serializer: ChunkSerializer,
-}
-
-impl ClientWriter {
-    fn new(output: tcp::OwnedWriteHalf) -> Self {
-        let clock = Clock(Instant::now());
-        let serializer = ChunkSerializer::new();
-
-        ClientWriter {
-            clock,
-            output,
-            serializer,
-        }
-    }
-
-    async fn send(&mut self, message: RtmpMessage) -> Result<(), Box<dyn Error>> {
-        self.send_with_options(message, false, false).await
-    }
-
-    async fn send_with_options(
-        &mut self,
-        message: RtmpMessage,
-        force_uncompressed: bool,
-        can_be_dropped: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        let payload = message
-            .into_message_payload(self.clock.timestamp(), 0)
-            .unwrap();
-        let packet = self
-            .serializer
-            .serialize(&payload, force_uncompressed, can_be_dropped)
-            .unwrap();
-
-        self.output.write_all(&packet.bytes).await?;
-        self.output.flush().await?;
-
-        Ok(())
-    }
+fn toerr<T: Display>(error: T) -> String {
+    format!("{}", error)
 }
 
 struct ClientStream {
-    reader: tcp::OwnedReadHalf,
-    client_writer: ClientWriter,
+    client: TcpStream,
+    clock: Clock,
+    serializer: ChunkSerializer,
     deserializer: ChunkDeserializer,
     buf: [u8; BUFFER_SIZE],
     next_stream_id: f64,
@@ -97,17 +60,16 @@ struct ClientStream {
 }
 
 impl ClientStream {
-    async fn connect_to_client(stream: TcpStream) -> Result<ClientStream, Box<dyn Error>> {
-        let (mut reader, mut writer) = stream.into_split();
+    async fn connect_to_client(mut client: TcpStream) -> Result<ClientStream, Box<dyn Error>> {
         let mut buf = [0u8; BUFFER_SIZE];
 
         let mut handshake = Handshake::new(PeerType::Server);
         let hs_start = handshake.generate_outbound_p0_and_p1().unwrap();
 
-        writer.write_all(&hs_start).await?;
+        client.write_all(&hs_start).await?;
 
         let first_input = loop {
-            let n = reader.read(&mut buf).await?;
+            let n = client.read(&mut buf).await?;
             if n == 0 {
                 return Err("client went away during handshake".into());
             }
@@ -117,13 +79,13 @@ impl ClientStream {
 
             match shake_progress {
                 HandshakeProcessResult::InProgress { response_bytes } => {
-                    writer.write_all(&response_bytes).await?;
+                    client.write_all(&response_bytes).await?;
                 }
                 HandshakeProcessResult::Completed {
                     response_bytes,
                     remaining_bytes,
                 } => {
-                    writer.write_all(&response_bytes).await?;
+                    client.write_all(&response_bytes).await?;
                     break remaining_bytes;
                 }
             }
@@ -155,7 +117,7 @@ impl ClientStream {
                 };
             }
 
-            let n = reader.read(&mut buf).await?;
+            let n = client.read(&mut buf).await?;
             if n == 0 {
                 return Err(Box::from("client went away before trying to connect"));
             }
@@ -165,12 +127,13 @@ impl ClientStream {
         let packet = serializer
             .set_max_chunk_size(128, RtmpTimestamp::new(0))
             .unwrap();
-        writer.write_all(&packet.bytes).await?;
+        client.write_all(&packet.bytes).await?;
 
         // We really oughta wait to read chunk size here.
-        let mut stream = ClientStream {
-            reader,
-            client_writer: ClientWriter::new(writer),
+        let mut stream = Self {
+            client,
+            clock: Clock(Instant::now()),
+            serializer,
             deserializer,
             buf,
             next_stream_id: 3.0,
@@ -191,7 +154,6 @@ impl ClientStream {
         }
 
         stream
-            .client_writer
             .send_with_options(
                 RtmpMessage::WindowAcknowledgement { size: 2500000 },
                 true,
@@ -200,7 +162,6 @@ impl ClientStream {
             .await?;
 
         stream
-            .client_writer
             .send(RtmpMessage::SetPeerBandwidth {
                 size: 2500000,
                 limit_type: PeerBandwidthLimitType::Dynamic,
@@ -208,7 +169,6 @@ impl ClientStream {
             .await?;
 
         stream
-            .client_writer
             .send(RtmpMessage::UserControl {
                 event_type: UserControlEventType::StreamBegin,
                 stream_id: Some(0),
@@ -232,10 +192,9 @@ impl ClientStream {
                 "objectEncoding".into() => Amf0Value::Number(0.0),
             })],
         };
-        stream.client_writer.send(connect_result_message).await?;
+        stream.send(connect_result_message).await?;
 
         stream
-            .client_writer
             .send(RtmpMessage::Amf0Command {
                 command_name: "onBWDone".into(),
                 transaction_id: 0.0,
@@ -247,8 +206,31 @@ impl ClientStream {
         Ok(stream)
     }
 
+    async fn send(&mut self, message: RtmpMessage) -> Result<(), Box<dyn Error>> {
+        self.send_with_options(message, false, false).await
+    }
+
+    async fn send_with_options(
+        &mut self,
+        message: RtmpMessage,
+        force_uncompressed: bool,
+        can_be_dropped: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let payload = message
+            .into_message_payload(self.clock.timestamp(), 0)
+            .unwrap();
+        let packet = self
+            .serializer
+            .serialize(&payload, force_uncompressed, can_be_dropped)
+            .unwrap();
+
+        self.client.write_all(&packet.bytes).await?;
+        self.client.flush().await?;
+
+        Ok(())
+    }
+
     /// Blocks until the next message appears on the stream. Returns None on EOF
-    /// BAD INTERFACE. get_next_message might need to be called multiple times.
     async fn read_message(
         &mut self,
     ) -> Result<Option<(RtmpTimestamp, RtmpMessage)>, Box<dyn Error>> {
@@ -257,7 +239,7 @@ impl ClientStream {
                 break pending;
             }
 
-            let n = self.reader.read(&mut self.buf).await?;
+            let n = self.client.read(&mut self.buf).await?;
             if n == 0 {
                 return Ok(None);
             }
@@ -273,23 +255,17 @@ impl ClientStream {
         };
 
         if self.bytes_since_ack >= self.ack_after_bytes {
-            self.client_writer
-                .send(RtmpMessage::Acknowledgement {
-                    sequence_number: self.bytes_since_ack,
-                })
-                .await?;
+            self.send(RtmpMessage::Acknowledgement {
+                sequence_number: self.bytes_since_ack,
+            })
+            .await?;
             self.bytes_since_ack = 0;
         }
 
-        // Payload knows the timestamp!
         let ret = payload.to_rtmp_message().map_err(toerr)?;
 
         Ok(Some((payload.timestamp, ret)))
     }
-}
-
-fn toerr<T: Display>(error: T) -> String {
-    format!("{}", error)
 }
 
 async fn handle_command(
@@ -303,7 +279,6 @@ async fn handle_command(
     match command_name.as_ref() {
         "FCPublish" => {
             stream
-                .client_writer
                 .send(RtmpMessage::Amf0Command {
                     command_name: "onFCPublish".into(),
                     transaction_id: 0.0,
@@ -314,7 +289,6 @@ async fn handle_command(
         }
         "publish" => {
             stream
-                .client_writer
                 .send(RtmpMessage::Amf0Command {
                     command_name: "onStatus".into(),
                     transaction_id: 0.0,
@@ -331,7 +305,6 @@ async fn handle_command(
         "createStream" => {
             stream.next_stream_id += 1.0;
             stream
-                .client_writer
                 .send(RtmpMessage::Amf0Command {
                     command_name: "_result".into(),
                     transaction_id,
@@ -342,7 +315,6 @@ async fn handle_command(
         }
         "releaseStream" | "_checkbw" => {
             stream
-                .client_writer
                 .send(RtmpMessage::Amf0Command {
                     command_name: "_result".into(),
                     transaction_id,
@@ -384,26 +356,20 @@ fn handle_amf_data(
     Ok(stream)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("0.0.0.0:1935").await?;
-    let (client, _) = listener.accept().await?;
-
-    let mut client_stream = ClientStream::connect_to_client(client).await?;
-    let mut out = io::stdout();
+async fn handle_client_stream<O: AsyncWriteExt + Unpin, M: Mixer>(
+    mut client_stream: ClientStream,
+    mut output: O,
+    mut mixer: M,
+) -> Result<(), Box<dyn Error>> {
+    let source = mixer.new_source();
     let mut outbuffer = Vec::new();
     flvmux::write_flv_header(&mut outbuffer).unwrap();
-    out.write_all(&outbuffer).await.unwrap();
+    output.write_all(&outbuffer).await.unwrap();
 
-    let mut mixer = mixer::FifoMixer::default();
-    let source = mixer.new_source();
-
-    // now just ignore all non-media messages
     while let Some((u_timestamp, msg)) = client_stream.read_message().await? {
         // Our RTMP library doesn't allow negative timestamps, but
         // FLVs do (so our mixers do, too). We get the worst of both
         // worlds here by just failing for large inbound timestamps.
-
         let timestamp = i32::try_from(u_timestamp.value)?;
         outbuffer.truncate(0);
 
@@ -435,11 +401,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             RtmpMessage::AudioData { data } => {
                 mixer.source_audio(&mut outbuffer, source, &data, timestamp)?;
-                out.write_all(&outbuffer).await?;
+                output.write_all(&outbuffer).await?;
             }
             RtmpMessage::VideoData { data } => {
                 mixer.source_video(&mut outbuffer, source, &data, timestamp)?;
-                out.write_all(&outbuffer).await?;
+                output.write_all(&outbuffer).await?;
             }
             RtmpMessage::Acknowledgement { .. } => {
                 // Is this where we set the acknowledgement size?
@@ -450,6 +416,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("0.0.0.0:1935").await?;
+    let (client, _) = listener.accept().await?;
+
+    let client_stream = ClientStream::connect_to_client(client).await?;
+    let out = io::stdout();
+    let mixer = mixer::FifoMixer::default();
+
+    handle_client_stream(client_stream, out, mixer).await?;
 
     // Plan
     // - Keep N threads around.
