@@ -5,7 +5,7 @@ use std::io::Write;
 
 use flvmux::{AacAudioPacketType, AvcPacketType};
 
-type MixerSource = usize;
+pub type MixerSource = usize;
 
 pub trait Mixer {
     fn new_source(&mut self) -> MixerSource;
@@ -29,9 +29,6 @@ struct SourceTs {
     audio_ts: i32,
     video_ts: i32,
 }
-
-// Something subtle here
-// - FLV allows negative timestamps.
 
 pub struct FifoMixer {
     source_timestamps: Vec<SourceTs>,

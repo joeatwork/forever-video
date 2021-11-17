@@ -35,7 +35,8 @@ impl Clock {
     }
 }
 
-const BUFFER_SIZE: usize = 4096;
+const READ_BUFFER_SIZE: usize = 4096;
+const PRE_MIXER_CHANNEL_BUFFER_SIZE: usize = 100;
 
 #[derive(Debug)]
 struct WriteMessage {
@@ -44,8 +45,17 @@ struct WriteMessage {
     can_be_dropped: bool,
 }
 
-fn toerr<T: Display>(error: T) -> String {
-    format!("{}", error)
+#[derive(Debug)]
+struct ClientError {
+    message: String,
+}
+
+impl<T: Display> From<T> for ClientError {
+    fn from(other: T) -> Self {
+        ClientError {
+            message: format!("{}", other),
+        }
+    }
 }
 
 struct ClientStream {
@@ -53,15 +63,15 @@ struct ClientStream {
     clock: Clock,
     serializer: ChunkSerializer,
     deserializer: ChunkDeserializer,
-    buf: [u8; BUFFER_SIZE],
+    buf: [u8; READ_BUFFER_SIZE],
     next_stream_id: f64,
     bytes_since_ack: u32,
     ack_after_bytes: u32,
 }
 
 impl ClientStream {
-    async fn connect_to_client(mut client: TcpStream) -> Result<ClientStream, Box<dyn Error>> {
-        let mut buf = [0u8; BUFFER_SIZE];
+    async fn connect_to_client(mut client: TcpStream) -> Result<ClientStream, ClientError> {
+        let mut buf = [0u8; READ_BUFFER_SIZE];
 
         let mut handshake = Handshake::new(PeerType::Server);
         let hs_start = handshake.generate_outbound_p0_and_p1().unwrap();
@@ -74,9 +84,7 @@ impl ClientStream {
                 return Err("client went away during handshake".into());
             }
 
-            let ongoing = handshake.process_bytes(&buf[..n]);
-            let shake_progress = ongoing.map_err(toerr)?;
-
+            let shake_progress = handshake.process_bytes(&buf[..n])?;
             match shake_progress {
                 HandshakeProcessResult::InProgress { response_bytes } => {
                     client.write_all(&response_bytes).await?;
@@ -99,8 +107,8 @@ impl ClientStream {
         // connection settings we ignore.)
         let mut input = &first_input[..];
         let connect_trans_id = loop {
-            if let Some(payload) = deserializer.get_next_message(input).map_err(toerr)? {
-                match payload.to_rtmp_message().map_err(toerr)? {
+            if let Some(payload) = deserializer.get_next_message(input)? {
+                match payload.to_rtmp_message()? {
                     RtmpMessage::Amf0Command {
                         command_name,
                         transaction_id,
@@ -119,7 +127,7 @@ impl ClientStream {
 
             let n = client.read(&mut buf).await?;
             if n == 0 {
-                return Err(Box::from("client went away before trying to connect"));
+                return Err("client went away before trying to connect".into());
             }
             input = &buf[..n];
         };
@@ -145,8 +153,7 @@ impl ClientStream {
         if let Some((_, RtmpMessage::SetChunkSize { size })) = msg0 {
             stream
                 .deserializer
-                .set_max_chunk_size(usize::try_from(size).unwrap())
-                .map_err(toerr)?
+                .set_max_chunk_size(usize::try_from(size).unwrap())?;
         } else {
             // 1) it's unlikely this is what is stalling out your conversation with the client.
             // 2) You *really* shouldn't just crash the service when the client acts weird.
@@ -231,11 +238,9 @@ impl ClientStream {
     }
 
     /// Blocks until the next message appears on the stream. Returns None on EOF
-    async fn read_message(
-        &mut self,
-    ) -> Result<Option<(RtmpTimestamp, RtmpMessage)>, Box<dyn Error>> {
+    async fn read_message(&mut self) -> Result<Option<(RtmpTimestamp, RtmpMessage)>, ClientError> {
         let payload = loop {
-            if let Some(pending) = self.deserializer.get_next_message(&[]).map_err(toerr)? {
+            if let Some(pending) = self.deserializer.get_next_message(&[])? {
                 break pending;
             }
 
@@ -245,11 +250,7 @@ impl ClientStream {
             }
 
             self.bytes_since_ack += u32::try_from(n).unwrap();
-            if let Some(payload) = self
-                .deserializer
-                .get_next_message(&self.buf[..n])
-                .map_err(toerr)?
-            {
+            if let Some(payload) = self.deserializer.get_next_message(&self.buf[..n])? {
                 break payload;
             }
         };
@@ -262,7 +263,7 @@ impl ClientStream {
             self.bytes_since_ack = 0;
         }
 
-        let ret = payload.to_rtmp_message().map_err(toerr)?;
+        let ret = payload.to_rtmp_message()?;
 
         Ok(Some((payload.timestamp, ret)))
     }
@@ -356,22 +357,30 @@ fn handle_amf_data(
     Ok(stream)
 }
 
-async fn handle_client_stream<O: AsyncWriteExt + Unpin, M: Mixer>(
-    mut client_stream: ClientStream,
-    mut output: O,
-    mut mixer: M,
-) -> Result<(), Box<dyn Error>> {
-    let source = mixer.new_source();
-    let mut outbuffer = Vec::new();
-    flvmux::write_flv_header(&mut outbuffer).unwrap();
-    output.write_all(&outbuffer).await.unwrap();
+#[derive(Debug)]
+enum MediaData {
+    Video {
+        data: Vec<u8>,
+        timestamp: i32,
+        source: mixer::MixerSource,
+    },
+    Audio {
+        data: Vec<u8>,
+        timestamp: i32,
+        source: mixer::MixerSource,
+    },
+}
 
+async fn handle_client_stream(
+    mut client_stream: ClientStream,
+    source: mixer::MixerSource,
+    sink: mpsc::Sender<MediaData>,
+) -> Result<(), ClientError> {
     while let Some((u_timestamp, msg)) = client_stream.read_message().await? {
         // Our RTMP library doesn't allow negative timestamps, but
         // FLVs do (so our mixers do, too). We get the worst of both
         // worlds here by just failing for large inbound timestamps.
         let timestamp = i32::try_from(u_timestamp.value)?;
-        outbuffer.truncate(0);
 
         match msg {
             // We need to respond to createStream
@@ -393,19 +402,24 @@ async fn handle_client_stream<O: AsyncWriteExt + Unpin, M: Mixer>(
             RtmpMessage::Amf0Data { values } => {
                 client_stream = handle_amf_data(client_stream, values)?;
             }
-            RtmpMessage::SetChunkSize { size } => {
-                client_stream
-                    .deserializer
-                    .set_max_chunk_size(usize::try_from(size).unwrap())
-                    .map_err(toerr)?;
-            }
+            RtmpMessage::SetChunkSize { size } => client_stream
+                .deserializer
+                .set_max_chunk_size(usize::try_from(size).unwrap())?,
             RtmpMessage::AudioData { data } => {
-                mixer.source_audio(&mut outbuffer, source, &data, timestamp)?;
-                output.write_all(&outbuffer).await?;
+                sink.send(MediaData::Audio {
+                    data: data.to_vec(), // sigh...
+                    timestamp,
+                    source,
+                })
+                .await?;
             }
             RtmpMessage::VideoData { data } => {
-                mixer.source_video(&mut outbuffer, source, &data, timestamp)?;
-                output.write_all(&outbuffer).await?;
+                sink.send(MediaData::Video {
+                    data: data.to_vec(), // also sigh...
+                    timestamp,
+                    source,
+                })
+                .await?;
             }
             RtmpMessage::Acknowledgement { .. } => {
                 // Is this where we set the acknowledgement size?
@@ -421,21 +435,48 @@ async fn handle_client_stream<O: AsyncWriteExt + Unpin, M: Mixer>(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("0.0.0.0:1935").await?;
-    let (client, _) = listener.accept().await?;
+async fn main() {
+    let listener = TcpListener::bind("0.0.0.0:1935").await.unwrap();
 
-    let client_stream = ClientStream::connect_to_client(client).await?;
-    let out = io::stdout();
-    let mixer = mixer::FifoMixer::default();
+    let mut out = io::stdout();
+    let mut mixer = mixer::FifoMixer::default();
 
-    handle_client_stream(client_stream, out, mixer).await?;
+    let mut outbuffer = Vec::new();
+    flvmux::write_flv_header(&mut outbuffer).unwrap();
+    out.write_all(&outbuffer).await.unwrap();
+
+    let (client, _) = listener.accept().await.unwrap(); // TODO?
+    let (sender, mut receiver) = mpsc::channel(PRE_MIXER_CHANNEL_BUFFER_SIZE);
+    let source = mixer.new_source();
+    tokio::spawn(async move {
+        // TODO do something better with errors, please
+        let client_stream = ClientStream::connect_to_client(client).await.unwrap();
+        handle_client_stream(client_stream, source, sender)
+            .await
+            .unwrap();
+    });
+
+    while let Some(media) = receiver.recv().await {
+        outbuffer.truncate(0);
+        let result = match media {
+            MediaData::Video {
+                data,
+                timestamp,
+                source,
+            } => mixer.source_video(&mut outbuffer, source, &data, timestamp),
+            MediaData::Audio {
+                data,
+                timestamp,
+                source,
+            } => mixer.source_audio(&mut outbuffer, source, &data, timestamp),
+        };
+        result.unwrap();
+        out.write_all(&outbuffer).await.unwrap(); // TODO
+    }
 
     // Plan
     // - Keep N threads around.
     // - for every connection, "assign" it to a thread or reject if we have too many connections.
     // - Thread - when assigned, grabs a connection, work work works, EVENTUALLY releases a connection
     eprintln!("TODO completed cleanly");
-
-    Ok(())
 }
