@@ -483,6 +483,7 @@ async fn main() {
                         eprintln!("client error: {:?}", e);
                     }
 
+                    client_count -= 1;
                     if client_count == 0 {
                         break;
                     } else {
