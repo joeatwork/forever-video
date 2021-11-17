@@ -3,7 +3,7 @@
 //   https://github.com/FFmpeg/FFmpeg/blob/05f9b3a0a570fcacbd38570f0860afdabc80a791/libavformat/rtmppkt.c
 //
 // As such, it is licensed under version 2.1 of the GNU Lesser General Public License,
-//  or (at your option) any later version.
+// or (at your option) any later version.
 
 #[macro_use]
 extern crate maplit;
@@ -61,8 +61,8 @@ impl ClientWriter {
         }
     }
 
-    async fn send(&mut self, message: RtmpMessage) {
-        self.send_with_options(message, false, false).await;
+    async fn send(&mut self, message: RtmpMessage) -> Result<(), Box<dyn Error>> {
+        self.send_with_options(message, false, false).await
     }
 
     async fn send_with_options(
@@ -70,7 +70,7 @@ impl ClientWriter {
         message: RtmpMessage,
         force_uncompressed: bool,
         can_be_dropped: bool,
-    ) {
+    ) -> Result<(), Box<dyn Error>> {
         let payload = message
             .into_message_payload(self.clock.timestamp(), 0)
             .unwrap();
@@ -79,15 +79,10 @@ impl ClientWriter {
             .serialize(&payload, force_uncompressed, can_be_dropped)
             .unwrap();
 
-        if let Err(e) = self.output.write_all(&packet.bytes).await {
-            eprintln!("client write error: {}", e);
-        }
+        self.output.write_all(&packet.bytes).await?;
+        self.output.flush().await?;
 
-        if let Err(e) = self.output.flush().await {
-            eprintln!("client flush error: {}", e);
-        }
-
-        // TODO this fn should return a Result<()>
+        Ok(())
     }
 }
 
@@ -202,7 +197,7 @@ impl ClientStream {
                 true,
                 false,
             )
-            .await;
+            .await?;
 
         stream
             .client_writer
@@ -210,7 +205,7 @@ impl ClientStream {
                 size: 2500000,
                 limit_type: PeerBandwidthLimitType::Dynamic,
             })
-            .await;
+            .await?;
 
         stream
             .client_writer
@@ -220,7 +215,7 @@ impl ClientStream {
                 timestamp: None,
                 buffer_length: None,
             })
-            .await;
+            .await?;
 
         let connect_result_message = RtmpMessage::Amf0Command {
             command_name: "_result".into(),
@@ -237,7 +232,7 @@ impl ClientStream {
                 "objectEncoding".into() => Amf0Value::Number(0.0),
             })],
         };
-        stream.client_writer.send(connect_result_message).await;
+        stream.client_writer.send(connect_result_message).await?;
 
         stream
             .client_writer
@@ -247,7 +242,7 @@ impl ClientStream {
                 command_object: Amf0Value::Null,
                 additional_arguments: vec![Amf0Value::Number(8192.0)],
             })
-            .await;
+            .await?;
 
         Ok(stream)
     }
@@ -280,10 +275,9 @@ impl ClientStream {
         if self.bytes_since_ack >= self.ack_after_bytes {
             self.client_writer
                 .send(RtmpMessage::Acknowledgement {
-                    // TODO this is wrong, should be "RtmpMessage::Acknowledgement"
                     sequence_number: self.bytes_since_ack,
                 })
-                .await;
+                .await?;
             self.bytes_since_ack = 0;
         }
 
@@ -316,7 +310,7 @@ async fn handle_command(
                     command_object: Amf0Value::Null,
                     additional_arguments: vec![],
                 })
-                .await;
+                .await?;
         }
         "publish" => {
             stream
@@ -332,7 +326,7 @@ async fn handle_command(
                         "details".into() => Amf0Value::Utf8String("no details provided".into()),
                     })],
                 })
-                .await;
+                .await?;
         }
         "createStream" => {
             stream.next_stream_id += 1.0;
@@ -344,7 +338,7 @@ async fn handle_command(
                     command_object: Amf0Value::Null,
                     additional_arguments: vec![Amf0Value::Number(stream.next_stream_id)],
                 })
-                .await;
+                .await?;
         }
         "releaseStream" | "_checkbw" => {
             stream
@@ -355,7 +349,7 @@ async fn handle_command(
                     command_object: Amf0Value::Null,
                     additional_arguments: vec![],
                 })
-                .await;
+                .await?;
         }
         "_error" | "_result" | "onStatus" | "onBWDone" => {
             eprintln!("TODO ignoring expected message {}", command_name);
