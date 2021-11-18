@@ -6,6 +6,8 @@ use std::io::Write;
 
 use flvmux::{AacAudioPacketType, AvcPacketType};
 
+const MIN_AUDIO_INTERVAL: i32 = 2000;
+
 pub type MixerSource = usize;
 
 #[derive(Debug)]
@@ -45,12 +47,40 @@ struct SourceTs {
     video_ts: i32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct LastSwitch {
+    current: MixerSource,
+    started: i32,
+}
+
+trait LastSwitchInfo {
+    fn ready_for_change(&self, source: MixerSource, now: i32) -> bool;
+    fn same_source(&self, source: MixerSource) -> bool;
+}
+
+impl LastSwitchInfo for Option<LastSwitch> {
+    fn ready_for_change(&self, source: MixerSource, now: i32) -> bool {
+        match self {
+            None => true,
+            Some(switch) => switch.current != source && MIN_AUDIO_INTERVAL < now - switch.started,
+        }
+    }
+
+    fn same_source(&self, source: MixerSource) -> bool {
+        if let Some(switch) = self {
+            switch.current == source
+        } else {
+            false
+        }
+    }
+}
+
 pub struct FifoMixer {
     source_timestamps: HashMap<MixerSource, SourceTs>,
     audio_timestamp: i32,
     video_timestamp: i32,
-    current_video_source: Option<MixerSource>,
-    current_audio_source: Option<MixerSource>,
+    last_video_switch: Option<LastSwitch>,
+    last_audio_switch: Option<LastSwitch>,
 }
 
 impl Default for FifoMixer {
@@ -59,8 +89,8 @@ impl Default for FifoMixer {
             source_timestamps: HashMap::new(),
             audio_timestamp: 0,
             video_timestamp: 0,
-            current_video_source: None,
-            current_audio_source: None,
+            last_video_switch: None,
+            last_audio_switch: None,
         }
     }
 }
@@ -89,21 +119,41 @@ impl Mixer for FifoMixer {
                 self.source_timestamps.get_mut(&source).unwrap()
             }
         };
-
         let dt = timestamp - ts.audio_ts;
         ts.audio_ts = timestamp;
 
+        // TODO our switching scheme stalls if the current audio stream stops
+        // (which we should expect) because this.audio_timestamp stops advancing.
+        // The right thing to do is to check the duration of the audio being played,
+        // detect when we've run out of audio, and then use the video timestamp to
+        // jumpstart things.
         match flvmux::read_audio_header(data)? {
-            AacAudioPacketType::SequenceHeader if self.current_audio_source.is_none() => {
-                // Ok
+            AacAudioPacketType::SequenceHeader if self.last_audio_switch.is_none() => {
+                self.last_audio_switch = Some(LastSwitch {
+                    current: source,
+                    started: self.audio_timestamp,
+                });
             }
-            AacAudioPacketType::Raw => {
-                // Ok
+            AacAudioPacketType::Raw
+                if self
+                    .last_audio_switch
+                    .ready_for_change(source, self.audio_timestamp) =>
+            {
+                eprintln!(
+                    "Audio change {:?} {} {}",
+                    self.last_audio_switch, source, self.audio_timestamp
+                );
+                self.last_audio_switch = Some(LastSwitch {
+                    current: source,
+                    started: self.audio_timestamp,
+                })
+            }
+            AacAudioPacketType::Raw if self.last_audio_switch.same_source(source) => {
+                // Ok, pass through
             }
             _ => return Ok(()),
         }
 
-        self.current_audio_source = Some(source);
         self.audio_timestamp += dt;
         let data_size = u32::try_from(data.len())?;
         flvmux::write_audio_tag_header(&mut out, data_size, self.audio_timestamp)?;
@@ -138,15 +188,24 @@ impl Mixer for FifoMixer {
         ts.video_ts = timestamp;
 
         match flvmux::read_video_header(data)? {
-            AvcPacketType::SequenceHeader if self.current_video_source.is_none() => {}
-            AvcPacketType::Nalu { seekable: true, .. } => {}
-            AvcPacketType::Nalu { .. } if Some(source) == self.current_video_source => {
-                // Ok
+            AvcPacketType::SequenceHeader if self.last_video_switch.is_none() => {
+                self.last_video_switch = Some(LastSwitch {
+                    current: source,
+                    started: self.video_timestamp,
+                })
+            }
+            AvcPacketType::Nalu { seekable: true, .. } => {
+                self.last_video_switch = Some(LastSwitch {
+                    current: source,
+                    started: self.video_timestamp,
+                })
+            }
+            AvcPacketType::Nalu { .. } if self.last_video_switch.same_source(source) => {
+                // Ok, pass though
             }
             _ => return Ok(()),
         }
 
-        self.current_video_source = Some(source);
         self.video_timestamp += dt;
         let data_size = u32::try_from(data.len())?;
         flvmux::write_video_tag_header(&mut out, data_size, self.video_timestamp)?;
