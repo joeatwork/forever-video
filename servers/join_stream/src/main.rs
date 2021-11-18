@@ -119,10 +119,7 @@ impl ClientStream {
                         break transaction_id;
                     }
                     other => {
-                        eprintln!(
-                            "TODO skipping client rtmp message before connect {:?}",
-                            other
-                        )
+                        eprintln!("skipping client rtmp message before connect {:?}", other)
                     }
                 };
             }
@@ -148,7 +145,7 @@ impl ClientStream {
             buf,
             next_stream_id: 3.0,
             bytes_since_ack: 0,
-            ack_after_bytes: 1048576, // TODO...
+            ack_after_bytes: 1048576,
         };
 
         let msg0 = stream.read_message().await?;
@@ -157,9 +154,9 @@ impl ClientStream {
                 .deserializer
                 .set_max_chunk_size(usize::try_from(size).unwrap())?;
         } else {
-            // 1) it's unlikely this is what is stalling out your conversation with the client.
-            // 2) You *really* shouldn't just crash the service when the client acts weird.
-            panic!("TODO expected chunk size from client, got {:?}", msg0);
+            // TODO, can't we just wait for this to happen when it happens?
+            // There is a default chunk size in the protocol.
+            return Err(format!("expected chunk size from client, got {:?}", msg0).into());
         }
 
         stream
@@ -191,7 +188,7 @@ impl ClientStream {
             transaction_id: connect_trans_id,
             command_object: Amf0Value::Object(hashmap! {
                 "fmsVer".into() => Amf0Value::Utf8String("ForeverTV/0.1".into()),
-                // TODO can we remove this capabilities? It's almost certainly a lie...
+                // This "capabilities" claim is a lie, we can only handle h264 video and aac audio
                 "capabilities".into() => Amf0Value::Number(31.0),
             }),
             additional_arguments: vec![Amf0Value::Object(hashmap! {
@@ -278,7 +275,6 @@ async fn handle_command(
     _command_object: Amf0Value,
     _additional_arguments: Vec<Amf0Value>,
 ) -> Result<ClientStream, Box<dyn Error>> {
-    eprintln!("TODO handle_command {}", command_name);
     match command_name.as_ref() {
         "FCPublish" => {
             stream
@@ -327,10 +323,10 @@ async fn handle_command(
                 .await?;
         }
         "_error" | "_result" | "onStatus" | "onBWDone" => {
-            eprintln!("TODO ignoring expected message {}", command_name);
+            eprintln!("ignoring expected message {}", command_name);
         }
         _ => {
-            eprintln!("TODO ignoring surprising message {}", command_name);
+            eprintln!("ignoring surprising message {}", command_name);
         }
     };
 
@@ -353,7 +349,7 @@ fn handle_amf_data(
             _ => unreachable!(),
         }
     } else {
-        eprintln!("TODO unrecognized data {:?}", data);
+        eprintln!("unrecognized data {:?}", data);
     }
 
     Ok(stream)
@@ -424,11 +420,10 @@ async fn handle_client_stream(
                 .await?;
             }
             RtmpMessage::Acknowledgement { .. } => {
-                // Is this where we set the acknowledgement size?
-                // pass.
+                // Ok
             }
             _ => {
-                eprintln!("TODO handled message from client: {:?}", msg);
+                eprintln!("ignoring unexpected client message: {:?}", msg);
             }
         }
     }
@@ -469,8 +464,6 @@ async fn main() {
                 result.unwrap();
                 out.write_all(&outbuffer).await.unwrap(); // TODO
             }
-
-            eprintln!("TODO No more writing to do.");
         });
 
         let mut next_source: mixer::MixerSource = 0;
